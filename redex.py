@@ -7,7 +7,6 @@
 import argparse
 import enum
 import errno
-import fnmatch
 import glob
 import itertools
 import json
@@ -28,23 +27,20 @@ from os.path import abspath, dirname, isdir, isfile, join
 from pipes import quote
 
 import pyredex.logger as logger
-import pyredex.unpacker as unpacker
 from pyredex.logger import log
 from pyredex.utils import (
     LibraryManager,
     UnpackManager,
     ZipManager,
     ZipReset,
-    abs_glob,
     argparse_yes_no_flag,
     dex_glob,
-    ensure_libs_dir,
     find_android_build_tool,
     get_file_ext,
     make_temp_dir,
     move_dexen_to_directories,
     remove_comments,
-    set_android_sdk_path,
+    sdk_search_order,
     sign_apk,
     with_temp_cleanup,
 )
@@ -517,15 +513,16 @@ def run_redex_binary(state, term_handler):
 
 def zipalign(unaligned_apk_path, output_apk_path, ignore_zipalign, page_align):
     # Align zip and optionally perform good compression.
-    zipalign = [
-        find_android_build_tool("zipalign"),
-        "4",
-        unaligned_apk_path,
-        output_apk_path,
-    ]
-    if page_align:
-        zipalign.insert(1, "-p")
     try:
+        zipalign = [
+            find_android_build_tool("zipalign"),
+            "4",
+            unaligned_apk_path,
+            output_apk_path,
+        ]
+        if page_align:
+            zipalign.insert(1, "-p")
+
         p = subprocess.Popen(zipalign, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out, _ = p.communicate()
         if p.returncode == 0:
@@ -851,7 +848,7 @@ def prepare_redex(args):
     debug_mode = args.unpack_only or args.debug
 
     if args.android_sdk_path:
-        set_android_sdk_path(args.android_sdk_path)
+        sdk_search_order.insert(0, lambda x: args.android_sdk_path)
 
     # avoid accidentally mixing up file formats since we now support
     # both apk files and Android bundle files

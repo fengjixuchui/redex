@@ -6,9 +6,9 @@
 
 import argparse
 import distutils.version
-import errno
 import fnmatch
 import glob
+import json
 import mmap
 import os
 import re
@@ -23,7 +23,6 @@ import pyredex.unpacker
 from pyredex.logger import log
 
 
-android_sdk_path = None
 temp_dirs = []
 
 
@@ -61,16 +60,9 @@ def with_temp_cleanup(fn, always_clean=False):
             remove_temp_dirs()
 
 
-def set_android_sdk_path(new_path):
-    global android_sdk_path
-    android_sdk_path = new_path
-    log('Setting SDK path to "%s"' % new_path)
-
-
-def find_android_build_tools_env():
+def _find_biggest_build_tools_version(base):
     VERSION_REGEXP = r"\d+\.\d+\.\d+$"
-    android_home = os.environ["ANDROID_SDK"]
-    build_tools = join(android_home, "build-tools")
+    build_tools = join(base, "build-tools")
     version = max(
         (d for d in os.listdir(build_tools) if re.match(VERSION_REGEXP, d)),
         key=distutils.version.StrictVersion,
@@ -78,22 +70,88 @@ def find_android_build_tools_env():
     return join(build_tools, version)
 
 
-def find_android_build_tools():
-    global android_sdk_path
-    if android_sdk_path:
-        return android_sdk_path
-    android_sdk_path = find_android_build_tools_env()
-    return android_sdk_path
+def find_android_build_tools_by_env():
+    if "ANDROID_SDK" in os.environ:
+        return _find_biggest_build_tools_version(os.environ["ANDROID_SDK"])
+    if "ANDROID_HOME" in os.environ:
+        return _find_biggest_build_tools_version(os.environ["ANDROID_HOME"])
+    return None
+
+
+# If the script isn't run in a directory that buck recognizes, set this
+# to a root dir.
+root_dir_for_buck = None
+
+
+def find_android_build_tools_by_buck():
+    def load_android_buckconfig_values():
+        cmd = ["buck", "audit", "config", "android", "--json"]
+        global root_dir_for_buck
+        cwd = root_dir_for_buck if root_dir_for_buck is not None else os.getcwd()
+        # Set NO_BUCKD to minimize disruption to any currently running buckd
+        env = dict(os.environ)
+        env["NO_BUCKD"] = "1"
+        raw = subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.DEVNULL, env=env)
+        return json.loads(raw)
+
+    log("Computing SDK path from buck")
+    try:
+        buckconfig = load_android_buckconfig_values()
+    except BaseException as e:
+        log("Failed loading buckconfig: %s" % e)
+        return None
+    if "android.sdk_path" not in buckconfig:
+        return None
+    sdk_path = buckconfig.get("android.sdk_path")
+
+    if "android.build_tools_version" in buckconfig:
+        version = buckconfig["android.build_tools_version"]
+        assert isinstance(sdk_path, str)
+        return join(sdk_path, "build-tools", version)
+    else:
+        return _find_biggest_build_tools_version(sdk_path)
+
+
+# This order is not necessarily equivalent to buck's. We prefer environment
+# variables as they are a lot cheaper.
+sdk_search_order = [
+    ("Env", find_android_build_tools_by_env),
+    ("Buck", find_android_build_tools_by_buck),
+]
 
 
 def find_android_build_tool(tool):
-    try:
-        candidate = join(find_android_build_tools(), tool)
-        if os.path.exists(candidate):
+    attempts = []
+
+    def try_find(name, base_dir_fn):
+        try:
+            if base_dir_fn is None:
+                return None
+            base_dir = base_dir_fn()
+            if not base_dir:
+                attempts.append(name + ":<Nothing>")
+                return None
+            attempts.append(name + ":" + base_dir)
+            candidate = join(base_dir, tool)
+            if os.path.exists(candidate):
+                return candidate
+        except BaseException:
+            pass
+        return None
+
+    global sdk_search_order
+    for name, base_dir_fn in sdk_search_order:
+        candidate = try_find(name, base_dir_fn)
+        if candidate:
             return candidate
-    except BaseException:
-        pass
-    return shutil.which(tool)
+
+    # By `PATH`.
+    tool_path = shutil.which(tool)
+    if tool_path is not None:
+        return tool_path
+    attempts.append("PATH")
+
+    raise RuntimeError("Could not find %s, searched %s" % (tool, ", ".join(attempts)))
 
 
 def find_apksigner():
@@ -126,23 +184,23 @@ def sign_apk(keystore, keypass, keyalias, apk):
     )
 
 
-def remove_comments_from_line(l):
+def remove_comments_from_line(line):
     (found_backslash, in_quote) = (False, False)
-    for idx, c in enumerate(l):
+    for idx, c in enumerate(line):
         if c == "\\" and not found_backslash:
             found_backslash = True
         elif c == '"' and not found_backslash:
             found_backslash = False
             in_quote = not in_quote
         elif c == "#" and not in_quote:
-            return l[:idx]
+            return line[:idx]
         else:
             found_backslash = False
-    return l
+    return line
 
 
 def remove_comments(lines):
-    return "".join([remove_comments_from_line(l) + "\n" for l in lines])
+    return "".join([remove_comments_from_line(line) + "\n" for line in lines])
 
 
 def argparse_yes_no_flag(parser, flag_name, on_prefix="", off_prefix="no-", **kwargs):
@@ -406,15 +464,13 @@ class LibraryManager:
             extracted_dir = join(libs_dir, "__extracted_libs__")
             # Ensure both directories exist.
             self.temporary_libs_dir = ensure_libs_dir(libs_dir, extracted_dir)
-            lib_count = 0
-            for lib_to_extract in libs_to_extract:
-                extract_path = join(extracted_dir, "lib_{}.so".format(lib_count))
+            for i, lib_to_extract in enumerate(libs_to_extract):
+                extract_path = join(extracted_dir, "lib_{}.so".format(i))
                 if lib_to_extract.endswith(xz_lib_name):
                     cmd = "xz -d --stdout {} > {}".format(lib_to_extract, extract_path)
                 else:
                     cmd = "zstd -d {} -o {}".format(lib_to_extract, extract_path)
-                subprocess.check_call(cmd, shell=True)
-                lib_count += 1
+                subprocess.check_call(cmd, shell=True)  # noqa: P204
 
     def __exit__(self, *args):
         # This dir was just here so we could scan it for classnames, but we don't
