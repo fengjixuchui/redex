@@ -23,10 +23,10 @@ void InlinerConfig::bind_config() {
   bind("run_local_dce", run_local_dce, run_local_dce);
   bind("no_inline_annos", {}, m_no_inline_annos);
   bind("force_inline_annos", {}, m_force_inline_annos);
-  bind("black_list", {}, m_black_list);
-  bind("black_list", {}, m_black_list);
-  bind("caller_black_list", {}, m_caller_black_list);
-  bind("intradex_white_list", {}, m_intradex_white_list,
+  bind("blocklist", {}, m_blocklist);
+  bind("blocklist", {}, m_blocklist);
+  bind("caller_blocklist", {}, m_caller_blocklist);
+  bind("intradex_allowlist", {}, m_intradex_allowlist,
        "The purpose of this white-list is to remove black-list entries when "
        "inlining after the InterDex pass has run. (This reduces the impact of "
        "black-list entries that avoid inlining conditional control-flow and "
@@ -102,7 +102,7 @@ void GlobalConfig::bind_config() {
   bind("keep_packages", {}, string_vector_param);
   bind("legacy_reflection_reachability", false, bool_param);
   bind("lower_with_cfg", {}, bool_param);
-  bind("method_sorting_whitelisted_substrings", {}, string_vector_param);
+  bind("method_sorting_allowlisted_substrings", {}, string_vector_param);
   bind("no_optimizations_annotations", {}, string_vector_param);
   bind("opt_decisions", OptDecisionsConfig(), opt_decisions_param);
   // TODO: Remove unused profiled_methods_file option and all build system

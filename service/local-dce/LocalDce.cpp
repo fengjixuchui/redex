@@ -49,7 +49,7 @@ void update_liveness(const IRInstruction* inst,
   auto op = inst->opcode();
   // The destination of an `invoke` is its return value, which is encoded as
   // the max position in the bitvector.
-  if (is_invoke(op) || is_filled_new_array(op) ||
+  if (opcode::is_an_invoke(op) || opcode::is_filled_new_array(op) ||
       inst->has_move_result_pseudo()) {
     bliveness.reset(bliveness.size() - 1);
   }
@@ -117,7 +117,7 @@ void LocalDce::dce(IRCode* code) {
         } else {
           // move-result-pseudo instructions will be automatically removed
           // when their primary instruction is deleted.
-          if (!opcode::is_move_result_pseudo(it->insn->opcode())) {
+          if (!opcode::is_a_move_result_pseudo(it->insn->opcode())) {
             auto forward_it = std::prev(it.base());
             dead_instructions.emplace_back(b, forward_it);
           }
@@ -195,7 +195,7 @@ bool LocalDce::is_required(cfg::ControlFlowGraph& cfg,
                            IRInstruction* inst,
                            const boost::dynamic_bitset<>& bliveness) {
   if (opcode::has_side_effects(inst->opcode())) {
-    if (is_invoke(inst->opcode())) {
+    if (opcode::is_an_invoke(inst->opcode())) {
       const auto meth =
           resolve_method(inst->get_method(), opcode_to_search(inst));
       if (meth == nullptr) {
@@ -205,13 +205,13 @@ bool LocalDce::is_required(cfg::ControlFlowGraph& cfg,
         return true;
       }
       return bliveness.test(bliveness.size() - 1);
-    } else if (is_conditional_branch(inst->opcode())) {
+    } else if (opcode::is_a_conditional_branch(inst->opcode())) {
       cfg::Edge* goto_edge = cfg.get_succ_edge_of_type(b, cfg::EDGE_GOTO);
       cfg::Edge* branch_edge = cfg.get_succ_edge_of_type(b, cfg::EDGE_BRANCH);
       always_assert(goto_edge != nullptr);
       always_assert(branch_edge != nullptr);
       return goto_edge->target() != branch_edge->target();
-    } else if (is_switch(inst->opcode())) {
+    } else if (opcode::is_switch(inst->opcode())) {
       cfg::Edge* goto_edge = cfg.get_succ_edge_of_type(b, cfg::EDGE_GOTO);
       always_assert(goto_edge != nullptr);
       auto branch_edges = cfg.get_succ_edges_of_type(b, cfg::EDGE_BRANCH);
@@ -225,7 +225,7 @@ bool LocalDce::is_required(cfg::ControlFlowGraph& cfg,
     return true;
   } else if (inst->has_dest()) {
     return bliveness.test(inst->dest());
-  } else if (is_filled_new_array(inst->opcode()) ||
+  } else if (opcode::is_filled_new_array(inst->opcode()) ||
              inst->has_move_result_pseudo()) {
     // These instructions pass their dests via the return-value slot, but
     // aren't inherently live like the invoke-* instructions.

@@ -10,11 +10,11 @@
 #include "Pass.h"
 
 struct SingleImplConfig {
-  std::vector<std::string> white_list;
-  std::vector<std::string> package_white_list;
-  std::vector<std::string> black_list;
-  std::vector<std::string> package_black_list;
-  std::vector<std::string> anno_black_list;
+  std::vector<std::string> allowlist;
+  std::vector<std::string> package_allowlist;
+  std::vector<std::string> blocklist;
+  std::vector<std::string> package_blocklist;
+  std::vector<std::string> anno_blocklist;
   bool intf_anno;
   bool meth_anno;
   bool field_anno;
@@ -27,11 +27,11 @@ class SingleImplPass : public Pass {
   SingleImplPass() : Pass("SingleImplPass") {}
 
   void bind_config() override {
-    bind("white_list", {}, m_pass_config.white_list);
-    bind("package_white_list", {}, m_pass_config.package_white_list);
-    bind("black_list", {}, m_pass_config.black_list);
-    bind("package_black_list", {}, m_pass_config.package_black_list);
-    bind("anno_black_list", {}, m_pass_config.anno_black_list);
+    bind("allowlist", {}, m_pass_config.allowlist);
+    bind("package_allowlist", {}, m_pass_config.package_allowlist);
+    bind("blocklist", {}, m_pass_config.blocklist);
+    bind("package_blocklist", {}, m_pass_config.package_blocklist);
+    bind("anno_blocklist", {}, m_pass_config.anno_blocklist);
     bind("type_annotations", true, m_pass_config.intf_anno);
     bind("method_annotations", true, m_pass_config.meth_anno);
     bind("field_annotations", true, m_pass_config.field_anno);

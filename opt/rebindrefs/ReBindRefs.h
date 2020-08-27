@@ -35,6 +35,10 @@ class ReBindRefsPass : public Pass {
   void bind_config() override {
     // Allowing resolving method ref to an external one.
     bind("rebind_to_external", false, m_rebind_to_external);
+    bind("supported_min_sdk_for_external_refs", 19,
+         m_supported_min_sdk_for_external_refs,
+         "If rebind_to_external is turned on, the minimal sdk level that can "
+         "be supported.");
     bind("excluded_externals", {}, m_excluded_externals,
          "Externals types/prefixes excluded from reference rebinding");
   }
@@ -44,7 +48,8 @@ class ReBindRefsPass : public Pass {
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
-  bool m_rebind_to_external;
+  bool m_rebind_to_external = false;
+  int32_t m_supported_min_sdk_for_external_refs;
   std::vector<std::string> m_excluded_externals;
   const api::AndroidSDK* m_min_sdk_api;
 };

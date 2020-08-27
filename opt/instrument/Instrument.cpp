@@ -100,7 +100,7 @@ bool match_class_name(std::string cls_name,
   return false;
 }
 
-// Check for inclusion in whitelist or blacklist of methods/classes.
+// Check for inclusion in allowlist or blocklist of methods/classes.
 bool is_included(const DexMethod* method,
                  const std::unordered_set<std::string>& set) {
   if (match_class_name(show_deobfuscated(method->get_class()), set)) {
@@ -350,7 +350,7 @@ IRList::iterator find_or_insn_insert_point(cfg::Block* block) {
       block->begin(), block->end(), [&](const MethodItemEntry& mie) {
         auto mie_op = mie.insn->opcode();
         return (mie.type == MFLOW_OPCODE &&
-                (opcode::is_internal(mie_op) || mie_op == OPCODE_MOVE ||
+                (opcode::is_an_internal(mie_op) || mie_op == OPCODE_MOVE ||
                  mie_op == OPCODE_MOVE_WIDE ||
                  mie_op == OPCODE_MOVE_EXCEPTION ||
                  mie_op == OPCODE_MOVE_OBJECT || mie_op == OPCODE_MOVE_RESULT ||
@@ -459,7 +459,7 @@ int instrument_onBasicBlockBegin(
       code->begin(), code->end(), [&](const MethodItemEntry& mie) {
         return mie.type == MFLOW_FALLTHROUGH ||
                (mie.type == MFLOW_OPCODE &&
-                opcode::is_load_param(mie.insn->opcode()));
+                opcode::is_a_load_param(mie.insn->opcode()));
       });
 
   for (size_t reg_index = 0; reg_index < num_vectors; ++reg_index) {
@@ -497,7 +497,7 @@ void instrument_onMethodBegin(DexMethod* method,
       code->begin(), code->end(), [&](const MethodItemEntry& mie) {
         return mie.type == MFLOW_FALLTHROUGH ||
                (mie.type == MFLOW_OPCODE &&
-                opcode::is_load_param(mie.insn->opcode()));
+                opcode::is_a_load_param(mie.insn->opcode()));
       });
 
   if (insert_point == code->end()) {
@@ -557,10 +557,10 @@ void patch_array_size(DexClass* analysis_cls,
       // this const can affect other instructions. (Well, we might have a
       // unique const number though.) So, just create a new const load
       // instruction. LocalDCE can clean up the redundant instructions.
-      std::make_tuple(/* m::is_opcode(OPCODE_CONST), */
-                      m::is_opcode(OPCODE_NEW_ARRAY),
-                      m::is_opcode(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT),
-                      m::is_opcode(OPCODE_SPUT_OBJECT)),
+      std::make_tuple(/* m::const_(), */
+                      m::new_array_(),
+                      m::move_result_pseudo_object_(),
+                      m::sput_object_()),
       [&](DexMethod* method,
           cfg::Block*,
           const std::vector<IRInstruction*>& insts) {
@@ -699,7 +699,7 @@ auto generate_sharded_analysis_methods(DexClass* cls,
     bool patched = false;
     walk::matching_opcodes_in_block(
         *new_method,
-        std::make_tuple(m::is_opcode(OPCODE_SGET_OBJECT)),
+        std::make_tuple(m::sget_object_()),
         [&](DexMethod* method,
             cfg::Block*,
             const std::vector<IRInstruction*>& insts) {
@@ -746,9 +746,8 @@ std::vector<DexFieldRef*> patch_sharded_arrays(DexClass* cls,
   const std::string deobfuscated_prefix = "sMethodStats";
   walk::matching_opcodes_in_block(
       *clinit,
-      std::make_tuple(m::is_opcode(OPCODE_NEW_ARRAY),
-                      m::is_opcode(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT),
-                      m::is_opcode(OPCODE_SPUT_OBJECT)),
+      std::make_tuple(m::new_array_(), m::move_result_pseudo_object_(),
+                      m::sput_object_()),
       [&](DexMethod* method,
           cfg::Block*,
           const std::vector<IRInstruction*>& insts) {
@@ -819,9 +818,8 @@ std::vector<DexFieldRef*> patch_sharded_arrays(DexClass* cls,
   patched = false;
   walk::matching_opcodes_in_block(
       *clinit,
-      std::make_tuple(m::is_opcode(OPCODE_NEW_ARRAY),
-                      m::is_opcode(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT),
-                      m::is_opcode(OPCODE_SPUT_OBJECT)),
+      std::make_tuple(m::new_array_(), m::move_result_pseudo_object_(),
+                      m::sput_object_()),
       [&](DexMethod* method,
           cfg::Block*,
           const std::vector<IRInstruction*>& insts) {
@@ -918,25 +916,25 @@ void do_simple_method_tracing(DexClass* analysis_cls,
       return 0;
     }
 
-    // Handle whitelist and blacklist.
-    if (!options.whitelist.empty()) {
-      if (is_included(method, options.whitelist)) {
-        TRACE(INSTRUMENT, 8, "Whitelist: included: %s", SHOW(method));
+    // Handle allowlist and blocklist.
+    if (!options.allowlist.empty()) {
+      if (is_included(method, options.allowlist)) {
+        TRACE(INSTRUMENT, 8, "Allow_list: included: %s", SHOW(method));
       } else {
         ++excluded;
-        TRACE(INSTRUMENT, 9, "Whitelist: excluded: %s", SHOW(method));
+        TRACE(INSTRUMENT, 9, "Allow_list: excluded: %s", SHOW(method));
         return 0;
       }
     }
 
-    // In case of a conflict, when an entry is present in both blacklist
-    // and whitelist, the blacklist is given priority and the entry
+    // In case of a conflict, when an entry is present in both blocklist
+    // and allowlist, the blocklist is given priority and the entry
     // is not instrumented.
-    if (is_included(method, options.blacklist)) {
+    if (is_included(method, options.blocklist)) {
       ++excluded;
-      TRACE(INSTRUMENT, 8, "Blacklist: excluded: %s", SHOW(method));
+      TRACE(INSTRUMENT, 8, "Block_list: excluded: %s", SHOW(method));
       ofs << "M,-1," << name << "," << sum_opcode_sizes << ",\""
-          << "BLACKLIST " << vshow(method->get_access(), true) << "\"\n";
+          << "BLOCK_LIST " << vshow(method->get_access(), true) << "\"\n";
       return 0;
     }
 
@@ -1123,21 +1121,21 @@ void do_basic_block_tracing(DexClass* analysis_cls,
       return;
     }
 
-    // Basic block tracing assumes whitelist or set of cold start classes.
-    if ((!options.whitelist.empty() &&
-         !is_included(method, options.whitelist)) ||
+    // Basic block tracing assumes allowlist or set of cold start classes.
+    if ((!options.allowlist.empty() &&
+         !is_included(method, options.allowlist)) ||
         (options.only_cold_start_class &&
          !is_included(method, cold_start_classes))) {
       return;
     }
 
-    // Blacklist has priority over whitelist or cold start list.
-    if (is_included(method, options.blacklist)) {
-      TRACE(INSTRUMENT, 9, "Blacklist: excluded: %s", SHOW(method));
+    // Block_list has priority over allowlist or cold start list.
+    if (is_included(method, options.blocklist)) {
+      TRACE(INSTRUMENT, 9, "Block_list: excluded: %s", SHOW(method));
       return;
     }
 
-    TRACE(INSTRUMENT, 9, "Whitelist: included: %s", SHOW(method));
+    TRACE(INSTRUMENT, 9, "Allow_list: included: %s", SHOW(method));
     all_methods++;
     method_index = instrument_onBasicBlockBegin(
         &code, method, method_onMethodExit_map, method_index, all_bb_nums,
@@ -1163,19 +1161,19 @@ void do_basic_block_tracing(DexClass* analysis_cls,
         (all_method_inst - 1), all_bb_inst, all_methods, all_bb_nums);
 }
 
-std::unordered_set<std::string> load_blacklist_file(
+std::unordered_set<std::string> load_blocklist_file(
     const std::string& file_name) {
-  // Assume the file simply enumerates blacklisted names.
+  // Assume the file simply enumerates excluded names.
   std::unordered_set<std::string> ret;
   std::ifstream ifs(file_name);
-  assert_log(ifs, "Can't open blacklist file: %s\n", SHOW(file_name));
+  assert_log(ifs, "Can't open blocklist file: %s\n", SHOW(file_name));
 
   std::string line;
   while (ifs >> line) {
     ret.insert(line);
   }
 
-  TRACE(INSTRUMENT, 3, "Loaded %zu blacklist entries from %s", ret.size(),
+  TRACE(INSTRUMENT, 3, "Loaded %zu blocklist entries from %s", ret.size(),
         SHOW(file_name));
   return ret;
 }
@@ -1186,9 +1184,9 @@ void InstrumentPass::bind_config() {
   bind("instrumentation_strategy", "", m_options.instrumentation_strategy);
   bind("analysis_class_name", "", m_options.analysis_class_name);
   bind("analysis_method_name", "", m_options.analysis_method_name);
-  bind("blacklist", {}, m_options.blacklist);
-  bind("whitelist", {}, m_options.whitelist);
-  bind("blacklist_file_name", "", m_options.blacklist_file_name);
+  bind("blocklist", {}, m_options.blocklist);
+  bind("allowlist", {}, m_options.allowlist);
+  bind("blocklist_file_name", "", m_options.blocklist_file_name);
   bind("metadata_file_name", "redex-instrument-metadata.txt",
        m_options.metadata_file_name);
   bind("num_stats_per_method", {1}, m_options.num_stats_per_method);
@@ -1243,9 +1241,9 @@ void InstrumentPass::run_pass(DexStoresVector& stores,
   }
 
   // Append black listed classes from the file, if exists.
-  if (!m_options.blacklist_file_name.empty()) {
-    for (const auto& e : load_blacklist_file(m_options.blacklist_file_name)) {
-      m_options.blacklist.insert(e);
+  if (!m_options.blocklist_file_name.empty()) {
+    for (const auto& e : load_blocklist_file(m_options.blocklist_file_name)) {
+      m_options.blocklist.insert(e);
     }
   }
 

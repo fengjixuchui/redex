@@ -57,7 +57,7 @@ DexType* get_dextype_from_dotname(const char* dotname) {
 // Search a class name in a list of package names, return true if there is a
 // match
 bool find_package(const char* name) {
-  // If there's no whitelisted package, optimize every package by default
+  // If there's no allowed package, optimize every package by default
   if (package_filter.empty()) {
     return true;
   }
@@ -448,12 +448,13 @@ void DeadRefs::track_callers(Scope& scope) {
           return;
         }
         if (insn->has_field()) {
-          auto field = resolve_field(insn->get_field(),
-                                     is_ifield_op(insn->opcode())
-                                         ? FieldSearch::Instance
-                                         : is_sfield_op(insn->opcode())
-                                               ? FieldSearch::Static
-                                               : FieldSearch::Any);
+          auto field =
+              resolve_field(insn->get_field(),
+                            opcode::is_an_ifield_op(insn->opcode())
+                                ? FieldSearch::Instance
+                                : opcode::is_an_sfield_op(insn->opcode())
+                                      ? FieldSearch::Static
+                                      : FieldSearch::Any);
           if (field == nullptr || !field->is_concrete()) return;
           to_erase.update(
               field->get_class(),

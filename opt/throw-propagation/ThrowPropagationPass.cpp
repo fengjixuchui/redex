@@ -57,9 +57,9 @@ constexpr const char* METRIC_ITERATIONS = "num_iterations";
 
 void ThrowPropagationPass::bind_config() {
   bind("debug", false, m_config.debug);
-  bind("black_list",
+  bind("blocklist",
        {},
-       m_config.black_list,
+       m_config.blocklist,
        "List of classes that will not be analyzed to determine which methods "
        "have no return.");
 }
@@ -72,14 +72,14 @@ std::unordered_set<DexMethod*> ThrowPropagationPass::get_no_return_methods(
         method->rstate.no_optimizations()) {
       return;
     }
-    if (config.black_list.count(method->get_class())) {
+    if (config.blocklist.count(method->get_class())) {
       TRACE(TP, 4, "black-listed method: %s", SHOW(method));
       return;
     }
     bool can_return{false};
     editable_cfg_adapter::iterate_with_iterator(
         method->get_code(), [&can_return](const IRList::iterator& it) {
-          if (is_return(it->insn->opcode())) {
+          if (opcode::is_a_return(it->insn->opcode())) {
             can_return = true;
             return editable_cfg_adapter::LOOP_BREAK;
           } else {
@@ -103,7 +103,7 @@ ThrowPropagationPass::Stats ThrowPropagationPass::run(
   ThrowPropagationPass::Stats stats;
   cfg::ScopedCFG cfg(code);
   auto is_no_return_invoke = [&](IRInstruction* insn) {
-    if (!is_invoke(insn->opcode())) {
+    if (!opcode::is_an_invoke(insn->opcode())) {
       return false;
     }
     if (insn->opcode() == OPCODE_INVOKE_SUPER) {

@@ -22,6 +22,7 @@ libredex_la_SOURCES = \
 	liblocator/locator.cpp \
 	libredex/ABExperimentContext.cpp \
 	libredex/ABExperimentContextImpl.cpp \
+	libredex/AnalysisUsage.cpp \
 	libredex/AnnoUtils.cpp \
 	libredex/ApiLevelChecker.cpp \
 	libredex/ApkManager.cpp \
@@ -59,6 +60,7 @@ libredex_la_SOURCES = \
 	libredex/DexStoreUtil.cpp \
 	libredex/DuplicateClasses.cpp \
 	libredex/EditableCfgAdapter.cpp \
+	libredex/FbjniMarker.cpp \
 	libredex/FrameworkApi.cpp \
 	libredex/FrequentlyUsedPointersCache.cpp \
 	libredex/GlobalConfig.cpp \
@@ -78,6 +80,7 @@ libredex_la_SOURCES = \
 	libredex/IRTypeChecker.cpp \
 	libredex/IRTypeChecker.cpp \
 	libredex/JarLoader.cpp \
+	libredex/JavaParserUtil.cpp \
 	libredex/JsonWrapper.cpp \
 	libredex/KeepReason.cpp \
 	libredex/Match.cpp \
@@ -296,7 +299,7 @@ libopt_la_SOURCES = \
 	opt/remove_gotos/RemoveGotos.cpp \
 	opt/remove-unused-args/RemoveUnusedArgs.cpp \
 	opt/renameclasses/RenameClassesV2.cpp \
-	opt/reorder-interfaces/ReorderInterfaces.cpp \
+	opt/reorder-interfaces-decl/ReorderInterfacesDecl.cpp \
 	opt/reduce-array-literals/ReduceArrayLiterals.cpp \
 	opt/reduce-gotos/ReduceGotos.cpp \
 	opt/resolve-refs/ResolveRefsPass.cpp \
@@ -323,6 +326,7 @@ libopt_la_SOURCES = \
 	opt/track_resources/TrackResources.cpp \
 	opt/throw-propagation/ThrowPropagationPass.cpp \
 	opt/type-analysis/GlobalTypeAnalysisPass.cpp \
+	opt/type-analysis/TypeAnalysisCallGraphGenerationPass.cpp \
 	opt/unreferenced_interfaces/UnreferencedInterfaces.cpp \
 	opt/unmark_proguard_keep/UnmarkProguardKeep.cpp \
 	opt/up-code-motion/UpCodeMotion.cpp \

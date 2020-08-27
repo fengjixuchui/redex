@@ -85,9 +85,10 @@ class PatriciaTreeMapAbstractPartition final
     return m_map;
   }
 
-  Domain get(const Label& label) const {
+  const Domain& get(const Label& label) const {
     if (is_top()) {
-      return Domain::top();
+      static const Domain top = Domain::top();
+      return top;
     }
     return m_map.at(label);
   }
@@ -114,6 +115,13 @@ class PatriciaTreeMapAbstractPartition final
     }
     m_map.update(operation, label);
     return *this;
+  }
+
+  bool map(std::function<Domain(const Domain&)> f) {
+    if (is_top()) {
+      return false;
+    }
+    return m_map.map(f);
   }
 
   bool is_top() const override { return m_is_top; }

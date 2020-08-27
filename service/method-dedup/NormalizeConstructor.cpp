@@ -68,7 +68,7 @@ boost::optional<ConstructorSummary> summarize_constructor_logic(
   editable_cfg_adapter::iterate(code, [&](const MethodItemEntry& mie) {
     auto insn = mie.insn;
     auto opcode = insn->opcode();
-    if (is_invoke_direct(opcode)) {
+    if (opcode::is_invoke_direct(opcode)) {
       auto ref = insn->get_method();
       if (!super_ctor_invocatoin && method::is_init(ref) &&
           ref->get_class() != method->get_class()) {
@@ -78,15 +78,15 @@ boost::optional<ConstructorSummary> summarize_constructor_logic(
         super_ctor_invocatoin = nullptr;
         return editable_cfg_adapter::LoopExit::LOOP_BREAK;
       }
-    } else if (is_return_void(opcode)) {
+    } else if (opcode::is_return_void(opcode)) {
       return editable_cfg_adapter::LoopExit::LOOP_BREAK;
-    } else if (is_iput(opcode)) {
+    } else if (opcode::is_an_iput(opcode)) {
       field_to_arg_id[insn->get_field()] = reg_to_arg_id[insn->src(0)];
       return editable_cfg_adapter::LoopExit::LOOP_CONTINUE;
-    } else if (opcode::is_load_param(opcode)) {
+    } else if (opcode::is_a_load_param(opcode)) {
       reg_to_arg_id[insn->dest()] = arg_index++;
       return editable_cfg_adapter::LoopExit::LOOP_CONTINUE;
-    } else if (opcode::is_move(opcode)) {
+    } else if (opcode::is_a_move(opcode)) {
       reg_to_arg_id[insn->dest()] = reg_to_arg_id[insn->src(0)];
       return editable_cfg_adapter::LoopExit::LOOP_CONTINUE;
     }

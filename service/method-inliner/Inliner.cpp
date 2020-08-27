@@ -117,7 +117,7 @@ MultiMethodInliner::MultiMethodInliner(
     XDexRefs x_dex(stores);
     walk::opcodes(scope, [](DexMethod* caller) { return true; },
                   [&](DexMethod* caller, IRInstruction* insn) {
-                    if (is_invoke(insn->opcode())) {
+                    if (opcode::is_an_invoke(insn->opcode())) {
                       auto callee =
                           resolver(insn->get_method(), opcode_to_search(insn));
                       if (callee != nullptr && callee->is_concrete() &&
@@ -156,7 +156,7 @@ MultiMethodInliner::MultiMethodInliner(
     walk::opcodes(
         scope, [](DexMethod* caller) { return true; },
         [&](DexMethod* caller, IRInstruction* insn) {
-          if (is_invoke(insn->opcode())) {
+          if (opcode::is_an_invoke(insn->opcode())) {
             auto callee = resolver(insn->get_method(), opcode_to_search(insn));
             if (true_virtual_callers.count(callee) == 0 && callee != nullptr &&
                 callee->is_concrete() && candidates.count(callee)) {
@@ -514,7 +514,7 @@ MultiMethodInliner::get_invoke_constant_arguments(
     auto last_insn = block->get_last_insn();
     for (auto& mie : InstructionIterable(block)) {
       auto insn = mie.insn;
-      if (is_invoke(insn->opcode())) {
+      if (opcode::is_an_invoke(insn->opcode())) {
         auto callee = resolver(insn->get_method(), opcode_to_search(insn));
         if (callees_set.count(callee)) {
           ConstantArguments constant_arguments;
@@ -552,7 +552,7 @@ void MultiMethodInliner::inline_callees(
   editable_cfg_adapter::iterate_with_iterator(
       caller->get_code(), [&](const IRList::iterator& it) {
         auto insn = it->insn;
-        if (!is_invoke(insn->opcode())) {
+        if (!opcode::is_an_invoke(insn->opcode())) {
           return editable_cfg_adapter::LOOP_CONTINUE;
         }
         auto callee = resolver(insn->get_method(), opcode_to_search(insn));
@@ -986,15 +986,15 @@ bool MultiMethodInliner::is_inlinable(const DexMethod* caller,
     }
     return false;
   }
-  if (is_blacklisted(callee)) {
+  if (is_blocklisted(callee)) {
     if (insn) {
-      log_nopt(INL_BLACKLISTED_CALLEE, callee);
+      log_nopt(INL_BLOCK_LISTED_CALLEE, callee);
     }
     return false;
   }
-  if (caller_is_blacklisted(caller)) {
+  if (caller_is_blocklisted(caller)) {
     if (insn) {
-      log_nopt(INL_BLACKLISTED_CALLER, caller);
+      log_nopt(INL_BLOCK_LISTED_CALLER, caller);
     }
     return false;
   }
@@ -1053,19 +1053,19 @@ void MultiMethodInliner::make_static_inlinable(
 }
 
 /**
- * Return whether the method or any of its ancestors are in the blacklist.
+ * Return whether the method or any of its ancestors are in the blocklist.
  * Typically used to prevent inlining / deletion of methods that are called
  * via reflection.
  */
-bool MultiMethodInliner::is_blacklisted(const DexMethod* callee) {
+bool MultiMethodInliner::is_blocklisted(const DexMethod* callee) {
   auto cls = type_class(callee->get_class());
-  // Enums' kept methods are all blacklisted
+  // Enums' kept methods are all excluded.
   if (is_enum(cls) && root(callee)) {
     return true;
   }
   while (cls != nullptr) {
-    if (m_config.get_black_list().count(cls->get_type())) {
-      info.blacklisted++;
+    if (m_config.get_blocklist().count(cls->get_type())) {
+      info.blocklisted++;
       return true;
     }
     cls = type_class(cls->get_super_class());
@@ -1099,7 +1099,7 @@ bool MultiMethodInliner::caller_too_large(DexType* caller_type,
     return false;
   }
 
-  if (m_config.whitelist_no_method_limit.count(caller_type)) {
+  if (m_config.allowlist_no_method_limit.count(caller_type)) {
     return false;
   }
 
@@ -1213,7 +1213,8 @@ static size_t get_invoke_cost(const DexMethod* callee) {
 static size_t get_inlined_cost(IRInstruction* insn) {
   auto op = insn->opcode();
   size_t cost{0};
-  if (!opcode::is_internal(op) && !opcode::is_move(op) && !is_return(op)) {
+  if (!opcode::is_an_internal(op) && !opcode::is_a_move(op) &&
+      !opcode::is_a_return(op)) {
     cost++;
     auto regs = insn->srcs_size() +
                 ((insn->has_dest() || insn->has_move_result_pseudo()) ? 1 : 0);
@@ -1221,7 +1222,7 @@ static size_t get_inlined_cost(IRInstruction* insn) {
     if (op == OPCODE_MOVE_EXCEPTION) {
       cost += 8; // accounting for book-keeping overhead of throw-blocks
     } else if (insn->has_method() || insn->has_field() || insn->has_type() ||
-               insn->has_string() || is_conditional_branch(op)) {
+               insn->has_string() || opcode::is_a_conditional_branch(op)) {
       cost++;
     } else if (insn->has_data()) {
       cost += 4 + insn->get_data()->size();
@@ -1231,9 +1232,9 @@ static size_t get_inlined_cost(IRInstruction* insn) {
         cost += 4;
       } else if (lit < -32768 || lit > 32767) {
         cost += 2;
-      } else if (is_const(op) && (lit < -8 || lit > 7)) {
+      } else if (opcode::is_a_const(op) && (lit < -8 || lit > 7)) {
         cost++;
-      } else if (!is_const(op) && (lit < -128 || lit > 127)) {
+      } else if (!opcode::is_a_const(op) && (lit < -128 || lit > 127)) {
         cost++;
       }
     }
@@ -1330,7 +1331,7 @@ static InlinedCostAndDeadBlocks get_inlined_cost(
       for (auto& mie : InstructionIterable(block)) {
         auto insn = mie.insn;
         cost += get_inlined_cost(insn);
-        if (is_return(insn->opcode())) {
+        if (opcode::is_a_return(insn->opcode())) {
           returns++;
         }
       }
@@ -1339,7 +1340,7 @@ static InlinedCostAndDeadBlocks get_inlined_cost(
     editable_cfg_adapter::iterate(code, [&](const MethodItemEntry& mie) {
       auto insn = mie.insn;
       cost += get_inlined_cost(insn);
-      if (is_return(insn->opcode())) {
+      if (opcode::is_a_return(insn->opcode())) {
         returns++;
       }
       return editable_cfg_adapter::LOOP_CONTINUE;
@@ -1609,10 +1610,10 @@ bool MultiMethodInliner::should_inline_optional(
   return true;
 }
 
-bool MultiMethodInliner::caller_is_blacklisted(const DexMethod* caller) {
+bool MultiMethodInliner::caller_is_blocklisted(const DexMethod* caller) {
   auto cls = caller->get_class();
-  if (m_config.get_caller_black_list().count(cls)) {
-    info.blacklisted++;
+  if (m_config.get_caller_blocklist().count(cls)) {
+    info.blocklisted++;
     return true;
   }
   return false;
@@ -1694,7 +1695,7 @@ bool MultiMethodInliner::cannot_inline_opcodes(
           can_inline = false;
           return editable_cfg_adapter::LOOP_BREAK;
         }
-        if (is_return(insn->opcode())) {
+        if (opcode::is_a_return(insn->opcode())) {
           ++ret_count;
         }
         return editable_cfg_adapter::LOOP_CONTINUE;
@@ -1809,9 +1810,10 @@ bool MultiMethodInliner::unknown_virtual(IRInstruction* insn) {
  * we don't know we have no idea whether the field was public or not anyway.
  */
 bool MultiMethodInliner::unknown_field(IRInstruction* insn) {
-  if (is_ifield_op(insn->opcode()) || is_sfield_op(insn->opcode())) {
+  if (opcode::is_an_ifield_op(insn->opcode()) ||
+      opcode::is_an_sfield_op(insn->opcode())) {
     auto ref = insn->get_field();
-    DexField* field = resolve_field(ref, is_sfield_op(insn->opcode())
+    DexField* field = resolve_field(ref, opcode::is_an_sfield_op(insn->opcode())
                                              ? FieldSearch::Static
                                              : FieldSearch::Instance);
     if (field == nullptr) {
@@ -1844,7 +1846,7 @@ bool MultiMethodInliner::check_android_os_version(IRInstruction* insn) {
   // non-existent field/method is usually guarded by checking that
   // `android.os.build.VERSION.SDK_INT` is larger than the required api level.
   auto op = insn->opcode();
-  if (is_sget(op)) {
+  if (opcode::is_an_sget(op)) {
     auto ref = insn->get_field();
     DexField* field = resolve_field(ref, FieldSearch::Static);
     if (field != nullptr && field == m_sdk_int_field) {
@@ -2148,7 +2150,7 @@ class MethodSplicer {
         continue;
       }
       if (it->type == MFLOW_OPCODE &&
-          opcode::is_load_param(it->insn->opcode())) {
+          opcode::is_a_load_param(it->insn->opcode())) {
         continue;
       }
       auto mie = clone(&*it);
@@ -2280,7 +2282,7 @@ void inline_method_unsafe(const DexMethod* caller_method,
   auto move_res = pos;
   while (move_res++ != caller_code->end() && move_res->type != MFLOW_OPCODE)
     ;
-  if (!opcode::is_move_result(move_res->insn->opcode())) {
+  if (!opcode::is_a_move_result(move_res->insn->opcode())) {
     move_res = caller_code->end();
   }
 
@@ -2296,7 +2298,8 @@ void inline_method_unsafe(const DexMethod* caller_method,
 
   const auto& ret_it = std::find_if(
       callee_code->begin(), callee_code->end(), [](const MethodItemEntry& mei) {
-        return mei.type == MFLOW_OPCODE && is_return(mei.insn->opcode());
+        return mei.type == MFLOW_OPCODE &&
+               opcode::is_a_return(mei.insn->opcode());
       });
 
   auto splice = MethodSplicer(caller_code, callee_code, *callee_reg_map,
@@ -2387,7 +2390,8 @@ void inline_tail_call(DexMethod* caller,
   auto it = callee_code->begin();
   while (it != callee_code->end()) {
     auto& mei = *it++;
-    if (mei.type == MFLOW_OPCODE && opcode::is_load_param(mei.insn->opcode())) {
+    if (mei.type == MFLOW_OPCODE &&
+        opcode::is_a_load_param(mei.insn->opcode())) {
       continue;
     }
     callee_code->erase(callee_code->iterator_to(mei));

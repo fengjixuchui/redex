@@ -54,7 +54,7 @@ void change_super_class(DexClass* cls, DexType* super_type) {
     auto code = ctor->get_code();
     for (auto& mie : InstructionIterable(code)) {
       auto insn = mie.insn;
-      if (!is_invoke_direct(insn->opcode()) || !insn->has_method()) {
+      if (!opcode::is_invoke_direct(insn->opcode()) || !insn->has_method()) {
         continue;
       }
       // Replace "invoke_direct v0, old_super_type;.<init>:()V" with
@@ -296,7 +296,7 @@ DexClass* create_merger_class(const DexType* type,
 void patch_iput(const IRList::iterator& it) {
   auto insn = it->insn;
   const auto op = insn->opcode();
-  always_assert(is_iput(op));
+  always_assert(opcode::is_an_iput(op));
   switch (op) {
   case OPCODE_IPUT_BYTE:
   case OPCODE_IPUT_CHAR:
@@ -313,7 +313,7 @@ void patch_iget(DexMethod* meth,
                 DexType* original_field_type) {
   auto insn = it->insn;
   const auto op = insn->opcode();
-  always_assert(is_iget(op));
+  always_assert(opcode::is_an_iget(op));
   switch (op) {
   case OPCODE_IGET_OBJECT: {
     auto dest = std::next(it)->insn->dest();

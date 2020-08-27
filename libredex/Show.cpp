@@ -874,19 +874,11 @@ std::string show(IROpcode opcode) {
 #define OP(op, ...) \
   case OPCODE_##op: \
     return #op;
-    OPS
-#undef OP
-        case IOPCODE_LOAD_PARAM : return "IOPCODE_LOAD_PARAM";
-  case IOPCODE_LOAD_PARAM_OBJECT:
-    return "IOPCODE_LOAD_PARAM_OBJECT";
-  case IOPCODE_LOAD_PARAM_WIDE:
-    return "IOPCODE_LOAD_PARAM_WIDE";
-  case IOPCODE_MOVE_RESULT_PSEUDO:
-    return "IOPCODE_MOVE_RESULT_PSEUDO";
-  case IOPCODE_MOVE_RESULT_PSEUDO_OBJECT:
-    return "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT";
-  case IOPCODE_MOVE_RESULT_PSEUDO_WIDE:
-    return "IOPCODE_MOVE_RESULT_PSEUDO_WIDE";
+#define IOP(op, ...) \
+  case IOPCODE_##op: \
+    return "IOPCODE_" #op;
+#define OPRANGE(...)
+#include "IROpcodes.def"
   }
   not_reached_log("Unknown opcode 0x%x", opcode);
 }

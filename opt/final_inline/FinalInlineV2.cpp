@@ -76,7 +76,7 @@ Scope reverse_tsort_by_clinit_deps(const Scope& scope) {
     if (clinit != nullptr && clinit->get_code() != nullptr) {
       for (auto& mie : InstructionIterable(clinit->get_code())) {
         auto insn = mie.insn;
-        if (is_sget(insn->opcode())) {
+        if (opcode::is_an_sget(insn->opcode())) {
           auto dependee_cls = type_class(insn->get_field()->get_class());
           if (dependee_cls == nullptr || dependee_cls == cls) {
             continue;
@@ -129,7 +129,7 @@ Scope reverse_tsort_by_init_deps(const Scope& scope) {
       if (ctor != nullptr && ctor->get_code() != nullptr) {
         for (auto& mie : InstructionIterable(ctor->get_code())) {
           auto insn = mie.insn;
-          if (is_iget(insn->opcode())) {
+          if (opcode::is_an_iget(insn->opcode())) {
             auto dependee_cls = type_class(insn->get_field()->get_class());
             if (dependee_cls == nullptr || dependee_cls == cls) {
               continue;
@@ -244,10 +244,10 @@ class ClassInitStrategy final : public call_graph::SingleCalleeStrategy {
 
 void encode_values(DexClass* cls,
                    const FieldEnvironment& field_env,
-                   const PatriciaTreeSet<const DexFieldRef*>& blacklist,
+                   const PatriciaTreeSet<const DexFieldRef*>& blocklist,
                    const XStoreRefs* xstores) {
   for (auto* field : cls->get_sfields()) {
-    if (blacklist.contains(field)) {
+    if (blocklist.contains(field)) {
       continue;
     }
     auto value = field_env.get(field);
@@ -338,7 +338,7 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
   Result ret{};
   for (auto& mie : InstructionIterable(code)) {
     auto insn = mie.insn;
-    if (is_sget(insn->opcode())) {
+    if (opcode::is_an_sget(insn->opcode())) {
       ret.add(insn->get_field());
     }
   }
@@ -350,7 +350,7 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
 
   for (auto& mie : InstructionIterable(code)) {
     auto insn = mie.insn;
-    if (is_invoke(insn->opcode())) {
+    if (opcode::is_an_invoke(insn->opcode())) {
       auto callee_method_def =
           resolve_method(insn->get_method(), opcode_to_search(insn), method);
       if (!callee_method_def || callee_method_def->is_external() ||
@@ -562,7 +562,7 @@ class ThisObjectAnalysis final
       for (auto it = ii.begin(); it != ii.end(); it++) {
         IRInstruction* insn = it->insn;
         auto op = insn->opcode();
-        if (is_invoke(op)) {
+        if (opcode::is_an_invoke(op)) {
           bool use_this = false;
           for (auto src : insn->srcs()) {
             auto this_info = env.get(src).get_constant();
@@ -647,15 +647,15 @@ class ThisObjectAnalysis final
 
 /**
  * This function adds instance fields in cls_to_check that the method
- * accessed in blacklist_ifields.
- * Return false if all ifields are blacklisted - no need to check further.
+ * accessed in blocklist_ifields.
+ * Return false if all ifields are excluded - no need to check further.
  */
 bool get_ifields_read(
-    const std::unordered_set<std::string>& whitelist_method_names,
+    const std::unordered_set<std::string>& allowlist_method_names,
     const std::unordered_set<const DexType*>& parent_intf_set,
     const DexClass* ifield_cls,
     const DexMethod* method,
-    ConcurrentSet<DexField*>* blacklist_ifields,
+    ConcurrentSet<DexField*>* blocklist_ifields,
     std::unordered_set<const DexMethod*>* visited) {
   if (visited->count(method)) {
     return true;
@@ -666,9 +666,9 @@ bool get_ifields_read(
       // For call on its parent's ctor, no need to proceed.
       return true;
     }
-    for (const auto& name : whitelist_method_names) {
-      // Whitelisted methods name from config, ignore.
-      // We have this whitelist so that we can ignore some methods that
+    for (const auto& name : allowlist_method_names) {
+      // Allowed methods name from config, ignore.
+      // We have this allowlist so that we can ignore some methods that
       // are safe and won't read instance field.
       // TODO: Switch to a proper interprocedural fixpoint analysis.
       if (method->get_name()->str() == name) {
@@ -679,20 +679,20 @@ bool get_ifields_read(
   if (method == nullptr || method->get_code() == nullptr) {
     // We can't track down further, don't process any ifields from ifield_cls.
     for (const auto& field : ifield_cls->get_ifields()) {
-      blacklist_ifields->emplace(field);
+      blocklist_ifields->emplace(field);
     }
     return false;
   }
   for (auto& mie : InstructionIterable(method->get_code())) {
     auto insn = mie.insn;
-    if (is_iget(insn->opcode())) {
+    if (opcode::is_an_iget(insn->opcode())) {
       // Meet accessing of a ifield in a method called from <init>, add
-      // to blacklist.
+      // to blocklist.
       auto field = resolve_field(insn->get_field(), FieldSearch::Instance);
       if (field != nullptr && field->get_class() == ifield_cls->get_type()) {
-        blacklist_ifields->emplace(field);
+        blocklist_ifields->emplace(field);
       }
-    } else if (is_invoke(insn->opcode())) {
+    } else if (opcode::is_an_invoke(insn->opcode())) {
       auto insn_method = insn->get_method();
       auto callee = resolve_method(insn_method, opcode_to_search(insn), method);
       if (insn->opcode() == OPCODE_INVOKE_DIRECT ||
@@ -732,8 +732,8 @@ bool get_ifields_read(
       }
       // Recusive check every methods accessed from <init>.
       bool keep_going =
-          get_ifields_read(whitelist_method_names, parent_intf_set, ifield_cls,
-                           callee, blacklist_ifields, visited);
+          get_ifields_read(allowlist_method_names, parent_intf_set, ifield_cls,
+                           callee, blocklist_ifields, visited);
       if (!keep_going) {
         return false;
       }
@@ -743,7 +743,7 @@ bool get_ifields_read(
 }
 
 /**
- * This function add ifields like x in following example in blacklist to avoid
+ * This function add ifields like x in following example in blocklist to avoid
  * inlining them.
  *   class Foo {
  *     final int x;
@@ -759,11 +759,11 @@ bool get_ifields_read(
  */
 ConcurrentSet<DexField*> get_ifields_read_in_callees(
     const Scope& scope,
-    const std::unordered_set<std::string>& whitelist_method_names) {
+    const std::unordered_set<std::string>& allowlist_method_names) {
   ConcurrentSet<DexField*> return_ifields;
   TypeSystem ts(scope);
   walk::parallel::classes(scope, [&return_ifields, &ts,
-                                  &whitelist_method_names](DexClass* cls) {
+                                  &allowlist_method_names](DexClass* cls) {
     if (cls->is_external()) {
       return;
     }
@@ -786,7 +786,7 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
       // Only check on methods called with this object as arguments.
       auto check_methods = fixpoint.collect_method_called_on_this();
       if (!check_methods) {
-        // This object escaped to heap, blacklist all.
+        // This object escaped to heap, blocklist all.
         for (const auto& field : cls->get_ifields()) {
           return_ifields.emplace(field);
         }
@@ -801,7 +801,7 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
         parent_intf_set.insert(intf_set.begin(), intf_set.end());
         for (const auto method : *check_methods) {
           bool keep_going =
-              get_ifields_read(whitelist_method_names, parent_intf_set, cls,
+              get_ifields_read(allowlist_method_names, parent_intf_set, cls,
                                method, &return_ifields, &visited);
           if (!keep_going) {
             break;
@@ -815,7 +815,7 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
 
 cp::EligibleIfields gather_ifield_candidates(
     const Scope& scope,
-    const std::unordered_set<std::string>& whitelist_method_names) {
+    const std::unordered_set<std::string>& allowlist_method_names) {
   cp::EligibleIfields eligible_ifields;
   std::unordered_set<DexField*> ifields_candidates;
   walk::fields(scope, [&](DexField* field) {
@@ -843,7 +843,7 @@ cp::EligibleIfields gather_ifield_candidates(
     for (auto& mie : InstructionIterable(code)) {
       auto insn = mie.insn;
       auto op = insn->opcode();
-      if (is_iput(op)) {
+      if (opcode::is_an_iput(op)) {
         auto field = resolve_field(insn->get_field(), FieldSearch::Instance);
         if (field == nullptr || (method::is_init(method) &&
                                  method->get_class() == field->get_class())) {
@@ -870,9 +870,9 @@ cp::EligibleIfields gather_ifield_candidates(
   for (DexField* field : ifields_candidates) {
     eligible_ifields.emplace(field);
   }
-  auto blacklist_ifields =
-      get_ifields_read_in_callees(scope, whitelist_method_names);
-  for (DexField* field : blacklist_ifields) {
+  auto blocklist_ifields =
+      get_ifields_read_in_callees(scope, allowlist_method_names);
+  for (DexField* field : blocklist_ifields) {
     eligible_ifields.erase(field);
   }
   return eligible_ifields;
@@ -882,7 +882,7 @@ size_t inline_final_gets(
     const Scope& scope,
     const XStoreRefs* xstores,
     const cp::WholeProgramState& wps,
-    const std::unordered_set<const DexType*>& black_list_types,
+    const std::unordered_set<const DexType*>& blocklist_types,
     cp::FieldType field_type) {
   size_t inlined_count{0};
   walk::code(scope, [&](const DexMethod* method, IRCode& code) {
@@ -895,9 +895,9 @@ size_t inline_final_gets(
       auto it = code.iterator_to(mie);
       auto insn = mie.insn;
       auto op = insn->opcode();
-      if (is_iget(op) || is_sget(op)) {
+      if (opcode::is_an_iget(op) || opcode::is_an_sget(op)) {
         auto field = resolve_field(insn->get_field());
-        if (field == nullptr || black_list_types.count(field->get_class())) {
+        if (field == nullptr || blocklist_types.count(field->get_class())) {
           continue;
         }
         if (field_type == cp::FieldType::INSTANCE && method::is_init(method) &&
@@ -932,7 +932,7 @@ size_t FinalInlinePassV2::run(const Scope& scope,
                               const Config& config) {
   try {
     auto wps = final_inline::analyze_and_simplify_clinits(scope, xstores);
-    return inline_final_gets(scope, xstores, wps, config.black_list_types,
+    return inline_final_gets(scope, xstores, wps, config.blocklist_types,
                              cp::FieldType::STATIC);
   } catch (final_inline::class_initialization_cycle& e) {
     std::cerr << e.what();
@@ -947,7 +947,7 @@ size_t FinalInlinePassV2::run_inline_ifields(
     const Config& config) {
   auto wps = final_inline::analyze_and_simplify_inits(scope, xstores,
                                                       eligible_ifields);
-  return inline_final_gets(scope, xstores, wps, config.black_list_types,
+  return inline_final_gets(scope, xstores, wps, config.blocklist_types,
                            cp::FieldType::INSTANCE);
 }
 
@@ -967,7 +967,7 @@ void FinalInlinePassV2::run_pass(DexStoresVector& stores,
   size_t inlined_ifields_count{0};
   if (m_config.inline_instance_field) {
     cp::EligibleIfields eligible_ifields =
-        gather_ifield_candidates(scope, m_config.whitelist_method_names);
+        gather_ifield_candidates(scope, m_config.allowlist_method_names);
     inlined_ifields_count =
         run_inline_ifields(scope, &xstores, eligible_ifields, m_config);
   }

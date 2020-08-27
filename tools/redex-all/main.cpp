@@ -34,6 +34,7 @@
 
 #include "ABExperimentContext.h"
 #include "CommentFilter.h"
+#include "ControlFlow.h" // To set DEBUG.
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexHasher.h"
@@ -54,6 +55,7 @@
 #include "ProguardMatcher.h"
 #include "ProguardParser.h" // New ProGuard Parser
 #include "ProguardPrintConfiguration.h" // New ProGuard configuration
+#include "Purity.h" // For defaults from config.
 #include "ReachableClasses.h"
 #include "RedexContext.h"
 #include "RedexResources.h"
@@ -791,7 +793,7 @@ void redex_frontend(ConfigFiles& conf, /* input */
     Timer time_pg_parsing("Parsed ProGuard config file");
     keep_rules::proguard_parser::parse_file(pg_config_path, &pg_config);
   }
-  keep_rules::proguard_parser::remove_blacklisted_rules(&pg_config);
+  keep_rules::proguard_parser::remove_blocklisted_rules(&pg_config);
 
   const auto& pg_libs = pg_config.libraryjars;
   args.jar_paths.insert(pg_libs.begin(), pg_libs.end());
@@ -816,7 +818,7 @@ void redex_frontend(ConfigFiles& conf, /* input */
   stores.emplace_back(std::move(root_store));
 
   const JsonWrapper& json_config = conf.get_json_config();
-  dup_classes::read_dup_class_whitelist(json_config);
+  dup_classes::read_dup_class_allowlist(json_config);
 
   run_rethrow_first_aggregate([&]() {
     Timer t("Load classes from dexes");
@@ -1127,6 +1129,8 @@ int main(int argc, char* argv[]) {
 
     slow_invariants_debug =
         args.config.get("slow_invariants_debug", false).asBool();
+    cfg::ControlFlowGraph::DEBUG =
+        cfg::ControlFlowGraph::DEBUG || slow_invariants_debug;
     if (slow_invariants_debug) {
       std::cerr << "Slow invariants enabled." << std::endl;
     }
@@ -1144,6 +1148,9 @@ int main(int argc, char* argv[]) {
     }
 
     redex_frontend(conf, args, *pg_config, stores, stats);
+
+    // Initialize purity defaults, if set.
+    purity::CacheConfig::parse_default(conf);
 
     auto const& passes = PassRegistry::get().get_passes();
     PassManager manager(passes, std::move(pg_config), args.config,

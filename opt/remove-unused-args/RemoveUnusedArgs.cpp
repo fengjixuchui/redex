@@ -79,13 +79,13 @@ void RemoveArgs::gather_results_used() {
         const auto ii = InstructionIterable(code);
         for (auto it = ii.begin(); it != ii.end(); it++) {
           auto insn = it->insn;
-          if (!is_invoke(insn->opcode())) {
+          if (!opcode::is_an_invoke(insn->opcode())) {
             continue;
           }
           const auto next = std::next(it);
           always_assert(next != ii.end());
           const auto peek = next->insn;
-          if (!opcode::is_move_result(peek->opcode())) {
+          if (!opcode::is_a_move_result(peek->opcode())) {
             continue;
           }
           auto method = insn->get_method()->as_def();
@@ -131,7 +131,7 @@ std::deque<uint16_t> RemoveArgs::compute_live_args(
       continue;
     }
     auto insn = it->insn;
-    if (opcode::is_load_param(insn->opcode())) {
+    if (opcode::is_a_load_param(insn->opcode())) {
       if (live_vars.contains(insn->dest()) ||
           (is_instance_method && it->insn == first_insn)) {
         // Mark live args live, and always mark the "this" arg live.
@@ -184,7 +184,7 @@ bool RemoveArgs::update_method_signature(
                     "We don't treat virtuals, so methods must be defined\n");
 
   const std::string& full_name = method->get_deobfuscated_name();
-  for (const auto& s : m_black_list) {
+  for (const auto& s : m_blocklist) {
     if (full_name.find(s) != std::string::npos) {
       TRACE(ARGS, 3,
             "Skipping {%s} due to black list match of {%s} against {%s}",
@@ -345,7 +345,7 @@ RemoveArgs::MethodStats RemoveArgs::update_meths_with_unused_args_or_results() {
       if (entry.remove_result) {
         for (const auto& mie : InstructionIterable(method->get_code())) {
           auto insn = mie.insn;
-          if (is_return_value(insn->opcode())) {
+          if (opcode::is_a_return_value(insn->opcode())) {
             insn->set_opcode(OPCODE_RETURN_VOID);
             insn->set_srcs_size(0);
           }
@@ -408,7 +408,7 @@ size_t RemoveArgs::update_callsites() {
         size_t callsite_args_removed = 0;
         for (const auto& mie : InstructionIterable(code)) {
           auto insn = mie.insn;
-          if (is_invoke(insn->opcode())) {
+          if (opcode::is_an_invoke(insn->opcode())) {
             size_t insn_args_removed = update_callsite(insn);
             if (insn_args_removed > 0) {
               log_opt(CALLSITE_ARGS_REMOVED, method, insn);
@@ -433,7 +433,7 @@ void RemoveUnusedArgsPass::run_pass(DexStoresVector& stores,
   LocalDce::Stats local_dce_stats{0, 0};
   while (true) {
     num_iterations++;
-    RemoveArgs rm_args(scope, m_black_list, m_total_iterations++);
+    RemoveArgs rm_args(scope, m_blocklist, m_total_iterations++);
     auto pass_stats = rm_args.run();
     if (pass_stats.methods_updated_count == 0) {
       break;

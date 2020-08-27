@@ -117,12 +117,12 @@ WholeProgramState::WholeProgramState(
     const Scope& scope,
     const interprocedural::FixpointIterator& fp_iter,
     const std::unordered_set<DexMethod*>& non_true_virtuals,
-    const std::unordered_set<const DexType*>& field_black_list) {
+    const std::unordered_set<const DexType*>& field_blocklist) {
   walk::fields(scope, [&](DexField* field) {
     // We exclude those marked by keep rules: keep-marked fields may be
     // written to by non-Dex bytecode.
     // All fields not in m_known_fields will be bound to Top.
-    if (field_black_list.count(field->get_class())) {
+    if (field_blocklist.count(field->get_class())) {
       return;
     }
     if (is_static(field) && !root(field)) {
@@ -210,12 +210,14 @@ void WholeProgramState::collect_field_values(
     const DexType* clinit_cls,
     ConcurrentMap<const DexField*, std::vector<ConstantValue>>*
         fields_value_tmp) {
-  if (!is_sput(insn->opcode()) && !is_iput(insn->opcode())) {
+  if (!opcode::is_an_sput(insn->opcode()) &&
+      !opcode::is_an_iput(insn->opcode())) {
     return;
   }
   auto field = resolve_field(insn->get_field());
   if (field != nullptr && m_known_fields.count(field)) {
-    if (is_sput(insn->opcode()) && field->get_class() == clinit_cls) {
+    if (opcode::is_an_sput(insn->opcode()) &&
+        field->get_class() == clinit_cls) {
       return;
     }
     auto value = env.get(insn->src(0));
@@ -240,7 +242,7 @@ void WholeProgramState::collect_return_values(
     ConcurrentMap<const DexMethod*, std::vector<ConstantValue>>*
         methods_value_tmp) {
   auto op = insn->opcode();
-  if (!is_return(op)) {
+  if (!opcode::is_a_return(op)) {
     return;
   }
   if (op == OPCODE_RETURN_VOID) {

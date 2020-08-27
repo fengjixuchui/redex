@@ -311,7 +311,7 @@ void run_inliner(DexStoresVector& stores,
   // Gather all inlinable candidates.
   auto inliner_config = conf.get_inliner_config();
   if (intra_dex) {
-    inliner_config.apply_intradex_white_list();
+    inliner_config.apply_intradex_allowlist();
   }
 
   method_profiles::MethodProfiles method_profiles =
@@ -392,8 +392,8 @@ void run_inliner(DexStoresVector& stores,
   TRACE(INLINE, 3, "max_call_stack_depth %ld",
         inliner.get_info().max_call_stack_depth);
   TRACE(INLINE, 3, "waited seconds %ld", inliner.get_info().waited_seconds);
-  TRACE(INLINE, 3, "blacklisted meths %ld",
-        (size_t)inliner.get_info().blacklisted);
+  TRACE(INLINE, 3, "blocklisted meths %ld",
+        (size_t)inliner.get_info().blocklisted);
   TRACE(INLINE, 3, "virtualizing methods %ld",
         (size_t)inliner.get_info().need_vmethod);
   TRACE(INLINE, 3, "invoke super %ld", (size_t)inliner.get_info().invoke_super);

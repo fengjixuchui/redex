@@ -576,10 +576,6 @@ class DedupBlocksImpl {
   // is located and dedup the common block created from split.
   void split_postfix_blocks(const PostfixSplitGroupMap& dups,
                             cfg::ControlFlowGraph& cfg) {
-    fix_dex_pos_pointers(dups.begin(), dups.end(),
-                         [](auto it) { return it->second.postfix_blocks; },
-                         cfg);
-
     for (const PostfixSplitGroupMap::value_type* entry : get_id_order(dups)) {
       const auto& group = entry->second;
       TRACE(DEDUP_BLOCKS, 4,
@@ -777,7 +773,7 @@ class DedupBlocksImpl {
     std::unordered_set<IRInstruction*> block_insns;
     for (auto it = iterable.begin(); it != iterable.end(); it++) {
       auto insn = it->insn;
-      if (is_invoke_direct(insn->opcode()) &&
+      if (opcode::is_invoke_direct(insn->opcode()) &&
           method::is_init(insn->get_method())) {
         TRACE(DEDUP_BLOCKS, 5, "[dedup blocks] found init invocation: %s",
               SHOW(insn));
@@ -806,8 +802,8 @@ class DedupBlocksImpl {
         }
         auto def = *defs.elements().begin();
         auto def_opcode = def->opcode();
-        always_assert(is_new_instance(def_opcode) ||
-                      opcode::is_load_param(def_opcode));
+        always_assert(opcode::is_new_instance(def_opcode) ||
+                      opcode::is_a_load_param(def_opcode));
         // Log def instruction if it is not an earlier instruction from the
         // current block.
         if (!block_insns.count(def)) {
@@ -829,7 +825,7 @@ class DedupBlocksImpl {
       auto env = fixpoint_iter.get_entry_state_at(block);
       for (auto& mie : InstructionIterable(block)) {
         IRInstruction* insn = mie.insn;
-        if (is_invoke_direct(insn->opcode()) &&
+        if (opcode::is_invoke_direct(insn->opcode()) &&
             method::is_init(insn->get_method())) {
           auto defs = defs_in.get(insn->src(0));
           always_assert(!defs.is_top());

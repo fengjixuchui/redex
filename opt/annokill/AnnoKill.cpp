@@ -247,7 +247,7 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
         } else if (insn->has_field()) {
           auto field = insn->get_field();
           auto fdef = resolve_field(field,
-                                    is_sfield_op(insn->opcode())
+                                    opcode::is_an_sfield_op(insn->opcode())
                                         ? FieldSearch::Static
                                         : FieldSearch::Instance);
           if (fdef != nullptr) field = fdef;
@@ -378,7 +378,7 @@ void AnnoKill::cleanup_aset(
     if (m_keep.count(anno_type) > 0) {
       TRACE(ANNO,
             3,
-            "Blacklisted annotation type %s, "
+            "Exclude annotation type %s, "
             "skipping...\n\tannotation: %s",
             SHOW(anno_type),
             SHOW(da));

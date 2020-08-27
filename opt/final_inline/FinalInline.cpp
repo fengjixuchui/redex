@@ -35,13 +35,13 @@ class FinalInlineImpl {
   const Scope& m_full_scope;
   FinalInlinePass::Config& m_config;
 
-  bool is_cls_blacklisted(DexClass* clazz) {
-    for (auto& type : m_config.black_list_types) {
+  bool is_cls_blocklisted(DexClass* clazz) {
+    for (auto& type : m_config.blocklist_types) {
       if (clazz->get_type() == type) {
         return true;
       }
     }
-    for (auto& anno_type : m_config.black_list_annos) {
+    for (auto& anno_type : m_config.blocklist_annos) {
       if (has_anno(clazz, anno_type)) {
         return true;
       }
@@ -94,7 +94,7 @@ class FinalInlineImpl {
     std::vector<DexClass*> smallscope;
     uint32_t aflags = ACC_STATIC | ACC_FINAL;
     for (auto clazz : m_full_scope) {
-      if (is_cls_blacklisted(clazz)) {
+      if (is_cls_blocklisted(clazz)) {
         continue;
       }
       bool found = can_delete(clazz);
@@ -201,7 +201,7 @@ class FinalInlineImpl {
         "static constructor doesn't have the proper access bits set\n");
     for (auto& mie : InstructionIterable(clinit->get_code())) {
       auto opcode = mie.insn;
-      if (opcode->has_field() && is_sput(opcode->opcode())) {
+      if (opcode->has_field() && opcode::is_an_sput(opcode->opcode())) {
         auto field = resolve_field(opcode->get_field(), FieldSearch::Static);
         if (field == nullptr || !field->is_concrete() ||
             field->get_class() != clazz->get_type()) {
@@ -217,7 +217,7 @@ class FinalInlineImpl {
     std::unordered_set<DexField*> inline_field;
     uint32_t aflags = ACC_STATIC | ACC_FINAL;
     for (auto clazz : m_full_scope) {
-      if (is_cls_blacklisted(clazz)) {
+      if (is_cls_blocklisted(clazz)) {
         continue;
       }
       std::unordered_map<DexField*, bool> blank_statics;
@@ -249,7 +249,7 @@ class FinalInlineImpl {
           auto ii = InstructionIterable(code);
           for (auto it = ii.begin(); it != ii.end(); ++it) {
             auto* insn = it->insn;
-            if (!is_sget(insn->opcode())) {
+            if (!opcode::is_an_sget(insn->opcode())) {
               continue;
             }
             auto field = resolve_field(insn->get_field(), FieldSearch::Static);
@@ -281,7 +281,7 @@ class FinalInlineImpl {
    * const op into an encoded value.
    */
   bool validate_const_for_encoded_value(IRInstruction* op) {
-    if (!is_const(op->opcode())) {
+    if (!opcode::is_a_const(op->opcode())) {
       return false;
     }
     switch (op->opcode()) {
@@ -299,7 +299,7 @@ class FinalInlineImpl {
    */
   bool validate_sput_for_encoded_value(const DexClass* clazz,
                                        IRInstruction* insn) {
-    if (!(insn->has_field() && is_sput(insn->opcode()))) {
+    if (!(insn->has_field() && opcode::is_an_sput(insn->opcode()))) {
       return false;
     }
     auto field = resolve_field(insn->get_field(), FieldSearch::Static);
@@ -405,7 +405,7 @@ class FinalInlineImpl {
     size_t nreplaced = 0;
     size_t ntotal = 0;
     for (auto clazz : m_full_scope) {
-      if (is_cls_blacklisted(clazz)) {
+      if (is_cls_blocklisted(clazz)) {
         continue;
       }
       auto clinit = clazz->get_clinit();
@@ -531,7 +531,7 @@ class FinalInlineImpl {
       const Scope& scope) {
     std::unordered_map<DexField*, std::vector<FieldDependency>> result;
     for (auto clazz : scope) {
-      if (is_cls_blacklisted(clazz)) {
+      if (is_cls_blocklisted(clazz)) {
         continue;
       }
       auto clinit = clazz->get_clinit();
@@ -554,7 +554,7 @@ class FinalInlineImpl {
       // Check the code, bail out if there is branch instruction in clinit
       // because that may make the following pattern matching problematic.
       // We have control flow analysis in FinalInlineV2.
-      if (is_branch(it->insn->opcode())) {
+      if (opcode::is_branch(it->insn->opcode())) {
         return;
       }
     }

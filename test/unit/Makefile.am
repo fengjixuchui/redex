@@ -14,6 +14,7 @@ LDADD = $(COMMON_TEST_LIBS)
 
 check_PROGRAMS = \
     aliased_registers_test \
+    analysis_usage_test \
     array_propagation_test \
     blaming_escape_test \
     boxed_boolean_propagation_test \
@@ -45,6 +46,7 @@ check_PROGRAMS = \
     evaluate_type_checks_test \
     exception_test \
     extract_native_test \
+    fbjni_marker_test \
     final_inline_test \
     final_inline_v2_test \
     fp_ev_test \
@@ -58,6 +60,7 @@ check_PROGRAMS = \
     ir_instruction_test \
     ir_list_test \
     ir_typechecker_test \
+    java_parser_util_test \
     literals_test \
     local_dce_test \
     local_pointers_test \
@@ -118,6 +121,8 @@ check_PROGRAMS = \
     xstorerefs_test
 
 aliased_registers_test_SOURCES = AliasedRegistersTest.cpp
+
+analysis_usage_test_SOURCES = AnalysisUsageTest.cpp
 
 array_propagation_test_SOURCES = constant-propagation/ArrayPropagationTest.cpp
 array_propagation_test_CPPFLAGS = $(COMMON_INCLUDES) $(COMMON_TEST_INCLUDES) -I$(top_srcdir)/sparta/test
@@ -188,6 +193,8 @@ exception_test_SOURCES = RedexExceptionTest.cpp
 
 extract_native_test_SOURCES = ExtractNativeTest.cpp
 
+fbjni_marker_test_SOURCES = FbjniMarkerTest.cpp
+
 final_inline_test_SOURCES = FinalInlineTest.cpp
 
 final_inline_v2_test_SOURCES = FinalInlineV2Test.cpp
@@ -216,6 +223,9 @@ ir_list_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 ir_typechecker_test_SOURCES = IRTypeCheckerTest.cpp
 ir_typechecker_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+java_parser_util_test_SOURCES = JavaParserUtilTest.cpp
+java_parser_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 literals_test_SOURCES = LiteralsTest.cpp
 
@@ -363,4 +373,109 @@ work_queue_test_SOURCES = WorkQueueTest.cpp
 
 xstorerefs_test_SOURCES = XStoreRefsTest.cpp
 
-TESTS = $(check_PROGRAMS)
+TESTS = \
+    aliased_registers_test \
+    analysis_usage_test \
+    array_propagation_test \
+    blaming_escape_test \
+    boxed_boolean_propagation_test \
+    branch_prefix_hoisting_test \
+    cfg_inliner_test \
+    cfg_mutation_test \
+    check_breadcrumbs_test \
+    check_cast_analysis_test \
+    concurrent_containers_test \
+    configurable_test \
+    constructor_analysis_test \
+    control_flow_test \
+    copy_propagation_test \
+    cse_test \
+    creators_test \
+    debug_info_test \
+    debug_test \
+    dedup_blocks_test \
+    dex_class_test \
+    dex_instruction_test \
+    dex_loader_test \
+    dex_mutate_test \
+    dex_output_test \
+    dex_type_environment_test \
+    dex_util_test \
+    dominators_test \
+    ev_arg_test \
+    ev_write_test \
+    evaluate_type_checks_test \
+    exception_test \
+    extract_native_test \
+    final_inline_test \
+    final_inline_v2_test \
+    fp_ev_test \
+    global_type_analysis_test \
+    graph_util_test \
+    hierarchy_util_test \
+    interprocedural_constant_propagation_test \
+    intraprocedural_constant_propagation_test \
+    ir_assembler_test \
+    ir_code_test \
+    ir_instruction_test \
+    ir_list_test \
+    ir_typechecker_test \
+    java_parser_util_test \
+    literals_test \
+    local_dce_test \
+    local_pointers_test \
+    loop_info_test \
+    match_test \
+    method_inline_test \
+    method_merger_test \
+    monitor_count_test \
+    mutf8_compare_test \
+    null_propagation_test \
+    object_inliner_test \
+    object_propagation_test \
+    optimize_enums_test \
+    outliner_type_analysis_test \
+    partial_pass_test \
+    peephole_test \
+    proguard_lexer_test \
+    proguard_map_test \
+    proguard_parser_test \
+    proguard_regex_test \
+    pure_analysis_test \
+    reaching_definitions_test \
+    reduce_array_literals_test \
+    reduce_gotos_test \
+    reflection_analysis_test \
+    reg_alloc_test \
+    registers_test \
+    remove_apilevel_checks_test \
+    remove_gotos_test \
+    remove_null_check_string_arg_test \
+    remove_recursive_locks_test \
+    remove_redundant_check_casts_test \
+    remove_uninstantiables_test \
+    remove_unused_args_test \
+    renamer_test \
+    resolver_test \
+    result_propagation_test \
+    side_effects_summary_test \
+    signed_constant_propagation_test \
+    split_huge_switch_test \
+    static_relo_v2_test \
+    strip_debug_info_test \
+    switch_dispatch_test \
+    trace_multithreading_test \
+    true_virtuals_test \
+    type_analysis_transform_test \
+    type_inference_test \
+    type_ref_updater_test \
+    type_reference_test \
+    type_system_test \
+    type_util_test \
+    up_code_motion_test \
+    used_vars_test \
+    virt_scope_test \
+    virtual_merging_test \
+    walkers_test \
+    work_queue_test \
+    xstorerefs_test

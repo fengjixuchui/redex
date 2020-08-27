@@ -36,7 +36,7 @@ class RemoveUnusedFields final {
   RemoveUnusedFields(const Config& config, const Scope& scope)
       : m_config(config),
         m_scope(scope),
-        m_remove_unread_field_put_types_whitelist(
+        m_remove_unread_field_put_types_allowlist(
             {type::java_lang_String(), type::java_lang_Class(),
              type::java_lang_Boolean(), type::java_lang_Byte(),
              type::java_lang_Short(), type::java_lang_Character(),
@@ -69,13 +69,13 @@ class RemoveUnusedFields final {
   }
 
  private:
-  bool is_blacklisted(const DexField* field) const {
-    return m_config.blacklist_types.count(field->get_type()) != 0 ||
-           m_config.blacklist_classes.count(field->get_class()) != 0;
+  bool is_blocklisted(const DexField* field) const {
+    return m_config.blocklist_types.count(field->get_type()) != 0 ||
+           m_config.blocklist_classes.count(field->get_class()) != 0;
   }
 
-  bool is_whitelisted(DexField* field) const {
-    return !m_config.whitelist || m_config.whitelist->count(field) != 0;
+  bool is_allowlisted(DexField* field) const {
+    return !m_config.allowlist || m_config.allowlist->count(field) != 0;
   }
 
   bool can_remove_unread_field_put(DexField* field) const {
@@ -93,7 +93,7 @@ class RemoveUnusedFields final {
 
     // Nobody should ever rely on the lifetime of strings, classes, boxed
     // values, or enum values
-    if (m_remove_unread_field_put_types_whitelist.count(t)) {
+    if (m_remove_unread_field_put_types_allowlist.count(t)) {
       return true;
     }
     if (type::is_subclass(m_java_lang_Enum, t)) {
@@ -134,8 +134,8 @@ class RemoveUnusedFields final {
             stats.reads_outside_init,
             stats.writes,
             is_synthetic(field));
-      if (can_remove(field) && !is_blacklisted(field) &&
-          is_whitelisted(field)) {
+      if (can_remove(field) && !is_blocklisted(field) &&
+          is_allowlisted(field)) {
         if (m_config.remove_unread_fields && stats.reads == 0) {
           m_unread_fields.emplace(field);
           if (m_config.remove_vestigial_objects_written_fields &&
@@ -180,22 +180,26 @@ class RemoveUnusedFields final {
         bool remove_insn = false;
         if (m_unread_fields.count(field)) {
           if (m_config.unsafe || can_remove_unread_field_put(field)) {
-            always_assert(is_iput(insn->opcode()) || is_sput(insn->opcode()));
+            always_assert(opcode::is_an_iput(insn->opcode()) ||
+                          opcode::is_an_sput(insn->opcode()));
             TRACE(RMUF, 5, "Removing %s", SHOW(insn));
             remove_insn = true;
           } else {
             m_unremovable_unread_field_puts++;
           }
         } else if (m_unwritten_fields.count(field)) {
-          always_assert(is_iget(insn->opcode()) || is_sget(insn->opcode()));
+          always_assert(opcode::is_an_iget(insn->opcode()) ||
+                        opcode::is_an_sget(insn->opcode()));
           TRACE(RMUF, 5, "Replacing %s with const 0", SHOW(insn));
           replace_insn = true;
         } else if (m_zero_written_fields.count(field)) {
-          if (is_iput(insn->opcode()) || is_sput(insn->opcode())) {
+          if (opcode::is_an_iput(insn->opcode()) ||
+              opcode::is_an_sput(insn->opcode())) {
             TRACE(RMUF, 5, "Removing %s", SHOW(insn));
             remove_insn = true;
           } else {
-            always_assert(is_iget(insn->opcode()) || is_sget(insn->opcode()));
+            always_assert(opcode::is_an_iget(insn->opcode()) ||
+                          opcode::is_an_sget(insn->opcode()));
             TRACE(RMUF, 5, "Replacing %s with const 0", SHOW(insn));
             replace_insn = true;
           }
@@ -225,7 +229,7 @@ class RemoveUnusedFields final {
   std::unordered_set<const DexField*> m_unwritten_fields;
   std::unordered_set<const DexField*> m_zero_written_fields;
   std::unordered_set<const DexField*> m_vestigial_objects_written_fields;
-  std::unordered_set<DexType*> m_remove_unread_field_put_types_whitelist;
+  std::unordered_set<DexType*> m_remove_unread_field_put_types_allowlist;
   DexType* m_java_lang_Enum;
   std::atomic<size_t> m_unremovable_unread_field_puts{0};
 };
