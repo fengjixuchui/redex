@@ -21,6 +21,8 @@
 #include "MethodOverrideGraph.h"
 #include "OptData.h"
 #include "OptDataDefs.h"
+#include "PassManager.h"
+#include "Show.h"
 #include "Walkers.h"
 
 namespace mog = method_override_graph;

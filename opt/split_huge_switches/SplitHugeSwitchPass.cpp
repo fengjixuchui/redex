@@ -8,6 +8,7 @@
 #include "SplitHugeSwitchPass.h"
 
 #include <algorithm>
+#include <iostream>
 #include <unordered_set>
 
 #include <boost/optional.hpp>
@@ -21,9 +22,11 @@
 #include "InterDexPass.h"
 #include "MethodProfiles.h"
 #include "MethodUtil.h"
+#include "PassManager.h"
 #include "PluginRegistry.h"
 #include "ReachingDefinitions.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
 

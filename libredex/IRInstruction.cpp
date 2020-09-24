@@ -7,8 +7,12 @@
 
 #include "IRInstruction.h"
 
+#include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
+#include "Show.h"
 
 #include <boost/range/any_range.hpp>
 #include <cstring>
@@ -67,7 +71,7 @@ bool IRInstruction::operator==(const IRInstruction& that) const {
   }
 }
 
-reg_t IRInstruction::src(size_t i) const {
+reg_t IRInstruction::src(src_index_t i) const {
   if (m_num_inline_srcs <= MAX_NUM_INLINE_SRCS) {
     always_assert(i < m_num_inline_srcs);
     return m_inline_srcs[i];
@@ -95,7 +99,7 @@ std::vector<reg_t> IRInstruction::srcs_vec() const {
   return result;
 }
 
-IRInstruction* IRInstruction::set_src(size_t i, reg_t reg) {
+IRInstruction* IRInstruction::set_src(src_index_t i, reg_t reg) {
   if (m_num_inline_srcs <= MAX_NUM_INLINE_SRCS) {
     always_assert(i < m_num_inline_srcs);
     m_inline_srcs[i] = reg;
@@ -112,7 +116,7 @@ size_t IRInstruction::srcs_size() const {
   return m_srcs->size();
 }
 
-IRInstruction* IRInstruction::set_srcs_size(uint16_t count) {
+IRInstruction* IRInstruction::set_srcs_size(size_t count) {
   if (m_num_inline_srcs <= MAX_NUM_INLINE_SRCS) {
     if (count <= MAX_NUM_INLINE_SRCS) {
       // staying in the inline state
@@ -199,7 +203,7 @@ uint16_t IRInstruction::size() const {
 
 // The instruction format doesn't tell us the width of registers for invoke
 // so we inspect the signature of the method we're calling
-bool IRInstruction::invoke_src_is_wide(size_t i) const {
+bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
   always_assert(has_method());
 
   // virtual methods have `this` as the 0th register argument, but the
@@ -217,7 +221,7 @@ bool IRInstruction::invoke_src_is_wide(size_t i) const {
   return type::is_wide_type(args[i]);
 }
 
-bool IRInstruction::src_is_wide(size_t i) const {
+bool IRInstruction::src_is_wide(src_index_t i) const {
   always_assert(i < srcs_size());
 
   if (opcode::is_an_invoke(m_opcode)) {
@@ -429,3 +433,39 @@ void IRInstruction::gather_types(std::vector<DexType*>& ltype) const {
     break;
   }
 }
+
+void IRInstruction::gather_fields(std::vector<DexFieldRef*>& lfield) const {
+  if (has_field()) {
+    lfield.push_back(m_field);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_fields(lfield);
+  }
+  if (has_methodhandle()) {
+    m_methodhandle->gather_fields(lfield);
+  }
+}
+
+void IRInstruction::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
+  if (has_method()) {
+    lmethod.push_back(m_method);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_methods(lmethod);
+  }
+  if (has_methodhandle()) {
+    m_methodhandle->gather_methods(lmethod);
+  }
+}
+
+void IRInstruction::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  if (has_methodhandle()) {
+    lmethodhandle.push_back(m_methodhandle);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_methodhandles(lmethodhandle);
+  }
+}
+
+std::string IRInstruction::show_opcode() const { return show(m_opcode); }

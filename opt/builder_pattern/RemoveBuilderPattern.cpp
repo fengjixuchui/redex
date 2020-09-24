@@ -6,9 +6,12 @@
 
 #include "BuilderAnalysis.h"
 #include "BuilderTransform.h"
+#include "ConfigFiles.h"
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "PassManager.h"
+#include "Show.h"
+#include "Trace.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
 

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <iostream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -17,8 +18,10 @@
 #include "DexUtil.h"
 #include "ReachableClasses.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "SingleImpl.h"
 #include "SingleImplDefs.h"
+#include "StlUtil.h"
 #include "Trace.h"
 #include "Walkers.h"
 
@@ -305,14 +308,8 @@ void AnalysisImpl::escape_cross_stores() {
  * Clean up the single impl map.
  */
 void AnalysisImpl::remove_escaped() {
-  auto it = single_impls.begin();
-  while (it != single_impls.end()) {
-    if (it->second.is_escaped()) {
-      it = single_impls.erase(it);
-    } else {
-      ++it;
-    }
-  }
+  std20::erase_if(single_impls,
+                  [](auto it) { return it->second.is_escaped(); });
 }
 
 /**

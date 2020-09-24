@@ -9,6 +9,8 @@
 
 #include "ClassMerging.h"
 #include "DexUtil.h"
+#include "Show.h"
+#include "Trace.h"
 
 using namespace class_merging;
 

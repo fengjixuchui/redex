@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "Trace.h"
+#include "Show.h"
 
 using namespace method_profiles;
 

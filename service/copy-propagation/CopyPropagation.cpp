@@ -14,6 +14,7 @@
 #include "CanonicalizeLocks.h"
 #include "ConstantUses.h"
 #include "ControlFlow.h"
+#include "DexOpcode.h"
 #include "DexUtil.h"
 #include "IRInstruction.h"
 #include "IROpcode.h"
@@ -21,6 +22,7 @@
 #include "MonotonicFixpointIterator.h"
 #include "Resolver.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "Walkers.h"
 
 using namespace sparta;

@@ -15,7 +15,10 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "IRInstruction.h"
+#include "PassManager.h"
 #include "ReachableClasses.h"
+#include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 namespace {

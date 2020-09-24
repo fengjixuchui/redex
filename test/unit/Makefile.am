@@ -62,9 +62,11 @@ check_PROGRAMS = \
     ir_typechecker_test \
     java_parser_util_test \
     literals_test \
+    live_range_test \
     local_dce_test \
     local_pointers_test \
     loop_info_test \
+    loosen_access_modifier_test \
     match_test \
     method_inline_test \
     method_merger_test \
@@ -132,7 +134,7 @@ blaming_escape_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 boxed_boolean_propagation_test_SOURCES = constant-propagation/BoxedBooleanPropagationTest.cpp
 
-branch_prefix_hoisting_test_SOURCES = BranchPrefixHoistingTest.cpp
+branch_prefix_hoisting_test_SOURCES = BranchPrefixHoistingTest.cpp ScopeHelper.cpp
 
 cfg_inliner_test_SOURCES = CFGInlinerTest.cpp
 cfg_inliner_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
@@ -229,6 +231,9 @@ java_parser_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 literals_test_SOURCES = LiteralsTest.cpp
 
+live_range_test_SOURCES = LiveRangeTest.cpp
+live_range_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
 local_dce_test_SOURCES = LocalDceTest.cpp ScopeHelper.cpp
 
 local_pointers_test_SOURCES = LocalPointersTest.cpp
@@ -236,6 +241,8 @@ local_pointers_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 loop_info_test_SOURCES = LoopInfoTest.cpp
 loop_info_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+loosen_access_modifier_test_SOURCES = LoosenAccessModifierTest.cpp
 
 match_test_SOURCES = MatchTest.cpp
 
@@ -373,6 +380,8 @@ work_queue_test_SOURCES = WorkQueueTest.cpp
 
 xstorerefs_test_SOURCES = XStoreRefsTest.cpp
 
+resolve_proguard_value_test_SOURCES = ResolveProguardAssumeValuesTest.cpp
+
 TESTS = \
     aliased_registers_test \
     analysis_usage_test \
@@ -422,9 +431,11 @@ TESTS = \
     ir_typechecker_test \
     java_parser_util_test \
     literals_test \
+    live_range_test \
     local_dce_test \
     local_pointers_test \
     loop_info_test \
+    loosen_access_modifier_test \
     match_test \
     method_inline_test \
     method_merger_test \
@@ -478,4 +489,5 @@ TESTS = \
     virtual_merging_test \
     walkers_test \
     work_queue_test \
-    xstorerefs_test
+    xstorerefs_test \
+    resolve_proguard_value_test

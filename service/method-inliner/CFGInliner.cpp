@@ -12,6 +12,8 @@
 #include "DexPosition.h"
 #include "IRList.h"
 #include "IROpcode.h"
+#include "Show.h"
+#include "Trace.h"
 
 namespace cfg {
 

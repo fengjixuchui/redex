@@ -10,6 +10,7 @@
 #include <boost/filesystem.hpp>
 #include <chrono>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -20,7 +21,9 @@
 #include "Match.h"
 #include "RedexResources.h"
 #include "ReflectionAnalysis.h"
+#include "Show.h"
 #include "StringUtil.h"
+#include "Trace.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
 

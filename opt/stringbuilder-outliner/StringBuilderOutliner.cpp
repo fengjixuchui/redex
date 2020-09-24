@@ -14,7 +14,9 @@
 #include "Creators.h"
 #include "DexAsm.h"
 #include "DexClass.h"
-#include "Pass.h"
+#include "PassManager.h"
+#include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 using namespace stringbuilder_outliner;

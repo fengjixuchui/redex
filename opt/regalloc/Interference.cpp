@@ -8,9 +8,11 @@
 #include "Interference.h"
 
 #include "ControlFlow.h"
+#include "DexOpcode.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "MonotonicFixpointIterator.h"
+#include "Show.h"
 
 namespace regalloc {
 

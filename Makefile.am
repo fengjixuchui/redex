@@ -42,7 +42,6 @@ libredex_la_SOURCES = \
 	libredex/DexCallSite.cpp \
 	libredex/DexClass.cpp \
 	libredex/DexDebugInstruction.cpp \
-	libredex/DexEncoding.cpp \
 	libredex/DexHasher.cpp \
 	libredex/DexIdx.cpp \
 	libredex/DexInstruction.cpp \
@@ -199,6 +198,7 @@ libredex_la_SOURCES = \
 	service/type-analysis/TypeAnalysisRuntimeAssert.cpp \
 	service/type-string-rewriter/TypeStringRewriter.cpp \
 	shared/DexDefs.cpp \
+	shared/DexEncoding.cpp \
 	shared/file-utils.cpp \
 	util/CommandProfiling.cpp \
 	util/JemallocUtil.cpp \
@@ -293,6 +293,7 @@ libopt_la_SOURCES = \
 	opt/remove_redundant_check_casts/RemoveRedundantCheckCasts.cpp \
 	opt/remove-uninstantiables/RemoveUninstantiablesPass.cpp \
 	opt/remove-unreachable/RemoveUnreachable.cpp \
+	opt/remove-unreachable/TypeAnalysisAwareRemoveUnreachable.cpp \
 	opt/remove-nullcheck-string-arg/RemoveNullcheckStringArg.cpp \
 	opt/remove-unused-fields/RemoveUnusedFields.cpp \
 	opt/remove_empty_classes/RemoveEmptyClasses.cpp \
@@ -303,7 +304,9 @@ libopt_la_SOURCES = \
 	opt/reduce-array-literals/ReduceArrayLiterals.cpp \
 	opt/reduce-gotos/ReduceGotos.cpp \
 	opt/resolve-refs/ResolveRefsPass.cpp \
+	opt/resolve-refs/ExternalRefsManglingPass.cpp \
 	opt/result-propagation/ResultPropagation.cpp \
+	opt/resolve-proguard-values/ResolveProguardAssumeValues.cpp \
 	opt/shorten-srcstrings/Shorten.cpp \
 	opt/make-public/MakePublicPass.cpp \
 	opt/methodinline/IntraDexInlinePass.cpp \

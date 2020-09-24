@@ -10,8 +10,13 @@
 #include <iterator>
 #include <vector>
 
+#include "DexClass.h"
+#include "DexDebugInstruction.h"
+#include "DexInstruction.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IRInstruction.h"
+#include "Show.h"
 
 bool TryEntry::operator==(const TryEntry& other) const {
   return type == other.type && *catch_start == *other.catch_start;
@@ -30,6 +35,12 @@ bool BranchTarget::operator==(const BranchTarget& other) const {
   if (src == nullptr || other.src == nullptr) return false;
   return *src == *other.src;
 }
+
+MethodItemEntry::MethodItemEntry(std::unique_ptr<DexDebugInstruction> dbgop)
+    : type(MFLOW_DEBUG), dbgop(std::move(dbgop)) {}
+
+MethodItemEntry::MethodItemEntry(std::unique_ptr<DexPosition> pos)
+    : type(MFLOW_POSITION), pos(std::move(pos)) {}
 
 MethodItemEntry::MethodItemEntry(const MethodItemEntry& that)
     : type(that.type) {
@@ -119,15 +130,14 @@ void MethodItemEntry::gather_methods(
   case MFLOW_POSITION:
   case MFLOW_FALLTHROUGH:
   case MFLOW_TARGET:
+  // DexDebugInstruction does not have method reference.
+  case MFLOW_DEBUG:
     break;
   case MFLOW_OPCODE:
     insn->gather_methods(lmethod);
     break;
   case MFLOW_DEX_OPCODE:
     dex_insn->gather_methods(lmethod);
-    break;
-  case MFLOW_DEBUG:
-    dbgop->gather_methods(lmethod);
     break;
   }
 }

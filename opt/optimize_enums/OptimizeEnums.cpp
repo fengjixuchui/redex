@@ -8,6 +8,7 @@
 #include "OptimizeEnums.h"
 
 #include "ClassAssemblingUtils.h"
+#include "ConfigFiles.h"
 #include "EnumAnalyzeGeneratedMethods.h"
 #include "EnumClinitAnalysis.h"
 #include "EnumInSwitch.h"
@@ -16,9 +17,12 @@
 #include "IRCode.h"
 #include "OptimizeEnumsAnalysis.h"
 #include "OptimizeEnumsGeneratedAnalysis.h"
+#include "PassManager.h"
+#include "ProguardMap.h"
 #include "Resolver.h"
 #include "ScopedCFG.h"
 #include "SwitchEquivFinder.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 /**
@@ -877,8 +881,12 @@ class OptimizeEnums {
         }
       }
 
-      if (type && is_enum(type_class(type))) {
-        return type;
+      if (type) {
+        if (auto possible_enum_cls = type_class(type)) {
+          if (is_enum(possible_enum_cls)) {
+            return type;
+          }
+        }
       }
 
       std::size_t found = class_name.find_last_of('/');

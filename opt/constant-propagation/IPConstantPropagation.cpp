@@ -7,12 +7,15 @@
 
 #include "IPConstantPropagation.h"
 
+#include "ConfigFiles.h"
 #include "ConstantEnvironment.h"
 #include "ConstantPropagationAnalysis.h"
 #include "ConstructorParams.h"
 #include "IPConstantPropagationAnalysis.h"
 #include "MethodOverrideGraph.h"
+#include "PassManager.h"
 #include "Timer.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 namespace mog = method_override_graph;

@@ -13,6 +13,8 @@
 #include "DexStoreUtil.h"
 #include "DexUtil.h"
 #include "Model.h"
+#include "Show.h"
+#include "Trace.h"
 
 using namespace class_merging;
 

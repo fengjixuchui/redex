@@ -42,12 +42,15 @@
 
 #include "VirtualMerging.h"
 
+#include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "CppUtil.h"
 #include "DedupVirtualMethods.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
+#include "Inliner.h"
 #include "MethodProfiles.h"
+#include "PassManager.h"
 #include "Resolver.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
@@ -103,6 +106,7 @@ VirtualMerging::VirtualMerging(DexStoresVector& stores,
                                          resolver, m_inliner_config,
                                          MultiMethodInlinerMode::None));
 }
+VirtualMerging::~VirtualMerging() {}
 
 // Part 1: Identify which virtual methods get invoked via invoke-super --- we'll
 // stay away from those virtual scopes

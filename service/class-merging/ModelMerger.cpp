@@ -8,15 +8,19 @@
 #include "ModelMerger.h"
 
 #include "ClassAssemblingUtils.h"
+#include "ConfigFiles.h"
 #include "DexUtil.h"
 #include "MethodReference.h"
 #include "PassManager.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "StlUtil.h"
 #include "TypeReference.h"
 #include "TypeStringRewriter.h"
 #include "TypeTagUtils.h"
 #include "Walkers.h"
 
+#include <fstream>
 #include <sstream>
 
 using namespace class_merging;
@@ -441,15 +445,13 @@ void trim_method_debug_map(
     std::unordered_map<DexMethod*, std::string>& method_debug_map) {
   TRACE(CLMG, 5, "Method debug map un-trimmed %d", method_debug_map.size());
   size_t trimmed_cnt = 0;
-  for (auto it = method_debug_map.begin(); it != method_debug_map.end();) {
-    auto owner_type = it->first->get_class();
-    if (mergeable_to_merger.count(owner_type) == 0) {
-      it = method_debug_map.erase(it);
+  std20::erase_if(method_debug_map, [&](auto it) {
+    if (mergeable_to_merger.count(it->first->get_class())) {
       ++trimmed_cnt;
-    } else {
-      ++it;
+      return true;
     }
-  }
+    return false;
+  });
 
   TRACE(CLMG, 5, "Method debug map trimmed %d", trimmed_cnt);
 }
@@ -581,7 +583,7 @@ std::vector<DexClass*> ModelMerger::merge_model(Scope& scope,
   for (auto merger : to_materialize) {
     auto type = const_cast<DexType*>(merger->type);
     for (auto mergeable : merger->mergeables) {
-      loosen_access_modifier(type_class(mergeable));
+      loosen_access_modifier_except_vmethods(type_class(mergeable));
       merged_type_names[mergeable->get_name()->str()] = type->get_name()->str();
       mergeable_to_merger[mergeable] = type;
     }

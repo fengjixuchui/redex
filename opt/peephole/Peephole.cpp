@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,7 +24,9 @@
 #include "IRInstruction.h"
 #include "PassManager.h"
 #include "RedundantCheckCastRemover.h"
+#include "Show.h"
 #include "SpartaWorkQueue.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 ////////////////////////////////////////////////////////////////////////////////

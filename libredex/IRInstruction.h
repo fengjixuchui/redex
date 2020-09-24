@@ -7,12 +7,21 @@
 
 #pragma once
 
-#include "DexCallSite.h"
-#include "DexInstruction.h"
-#include "DexMethodHandle.h"
-#include "Show.h"
-
 #include <boost/range/any_range.hpp>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include "Debug.h"
+#include "IROpcode.h"
+
+class DexCallSite;
+class DexFieldRef;
+class DexMethodHandle;
+class DexMethodRef;
+class DexOpcodeData;
+class DexString;
+class DexType;
 
 /*
  * Our IR is very similar to the Dalvik instruction set, but with a few tweaks
@@ -114,6 +123,10 @@
  *     invoke-static {v0} LQux;.a(LFoo;)V
  */
 using reg_t = uint32_t;
+using src_index_t = uint16_t;
+
+// Index to a method parameter. Used in an invoke instruction.
+using param_index_t = src_index_t;
 
 // We use this special register to denote the result of a method invocation or a
 // filled-array creation. If the result is a wide value, RESULT_REGISTER + 1
@@ -199,9 +212,9 @@ class IRInstruction final {
   // instructions. They explicitly refer to both halves of a pair, rather than
   // just the lower half. This method returns true on both lower and upper
   // halves.
-  bool invoke_src_is_wide(size_t i) const;
+  bool invoke_src_is_wide(src_index_t i) const;
 
-  bool src_is_wide(size_t i) const;
+  bool src_is_wide(src_index_t i) const;
   bool dest_is_wide() const {
     always_assert(has_dest());
     return opcode_impl::dest_is_wide(m_opcode);
@@ -224,10 +237,10 @@ class IRInstruction final {
    */
   IROpcode opcode() const { return m_opcode; }
   reg_t dest() const {
-    always_assert_log(has_dest(), "No dest for %s", SHOW(m_opcode));
+    always_assert_log(has_dest(), "No dest for %s", show_opcode().c_str());
     return m_dest;
   }
-  reg_t src(size_t i) const;
+  reg_t src(src_index_t i) const;
 
  private:
   using reg_range_super = boost::iterator_range<const reg_t*>;
@@ -256,8 +269,8 @@ class IRInstruction final {
     m_dest = reg;
     return this;
   }
-  IRInstruction* set_src(size_t i, reg_t reg);
-  IRInstruction* set_srcs_size(uint16_t count);
+  IRInstruction* set_src(src_index_t i, reg_t reg);
+  IRInstruction* set_srcs_size(size_t count);
 
   int64_t get_literal() const {
     always_assert(has_literal());
@@ -355,29 +368,9 @@ class IRInstruction final {
 
   void gather_types(std::vector<DexType*>& ltype) const;
 
-  void gather_fields(std::vector<DexFieldRef*>& lfield) const {
-    if (has_field()) {
-      lfield.push_back(m_field);
-    }
-    if (has_callsite()) {
-      m_callsite->gather_fields(lfield);
-    }
-    if (has_methodhandle()) {
-      m_methodhandle->gather_fields(lfield);
-    }
-  }
+  void gather_fields(std::vector<DexFieldRef*>& lfield) const;
 
-  void gather_methods(std::vector<DexMethodRef*>& lmethod) const {
-    if (has_method()) {
-      lmethod.push_back(m_method);
-    }
-    if (has_callsite()) {
-      m_callsite->gather_methods(lmethod);
-    }
-    if (has_methodhandle()) {
-      m_methodhandle->gather_methods(lmethod);
-    }
-  }
+  void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
 
   void gather_callsites(std::vector<DexCallSite*>& lcallsite) const {
     if (has_callsite()) {
@@ -385,20 +378,14 @@ class IRInstruction final {
     }
   }
 
-  void gather_methodhandles(
-      std::vector<DexMethodHandle*>& lmethodhandle) const {
-    if (has_methodhandle()) {
-      lmethodhandle.push_back(m_methodhandle);
-    }
-    if (has_callsite()) {
-      m_callsite->gather_methodhandles(lmethodhandle);
-    }
-  }
+  void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
 
   // Compute current instruction's hash.
   uint64_t hash() const;
 
  private:
+  std::string show_opcode() const; // To avoid "Show.h" in the header.
+
   // 2 is chosen because it's the maximum number of registers (32 bits each) we
   // can fit in the size of a pointer (on a 64bit system).
   // In practice, most IRInstructions have 2 or fewer source registers, so we

@@ -6,14 +6,20 @@
  */
 
 #include <atomic>
+#include <fstream>
+#include <iostream>
 
 #include "RemoveUnusedFields.h"
 
 #include "CFGMutation.h"
+#include "ConfigFiles.h"
 #include "DexClass.h"
 #include "FieldOpTracker.h"
 #include "IRCode.h"
+#include "PassManager.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 using namespace remove_unused_fields;

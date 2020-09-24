@@ -8,6 +8,7 @@
 #include "RegAlloc.h"
 
 #include <boost/functional/hash.hpp>
+#include <iostream>
 
 #include "Debug.h"
 #include "DexUtil.h"
@@ -16,11 +17,13 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "LiveRange.h"
+#include "PassManager.h"
 #include "Show.h"
 #include "Transform.h"
 #include "Walkers.h"
 
 #include "JemallocUtil.h"
+#include "Trace.h"
 
 namespace regalloc {
 

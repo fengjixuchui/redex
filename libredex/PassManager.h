@@ -7,31 +7,47 @@
 
 #pragma once
 
-#include "ApkManager.h"
-#include "DexHasher.h"
-#include "Pass.h"
-#include "ProguardConfiguration.h"
-#include "RedexOptions.h"
-
 #include <boost/optional.hpp>
-#include <json/json.h>
+#include <memory>
 #include <string>
 #include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "AnalysisUsage.h"
+#include "ApkManager.h"
+#include "DexHasher.h"
+#include "JsonWrapper.h"
+#include "ProguardConfiguration.h"
+#include "RedexOptions.h"
+
+struct ConfigFiles;
+class DexStore;
+class Pass;
+
+namespace Json {
+class Value;
+} // namespace Json
+
+// Must match DexStore.
+using DexStoresVector = std::vector<DexStore>;
+
 class PassManager {
  public:
-  explicit PassManager(
-      const std::vector<Pass*>& passes,
-      const Json::Value& config = Json::Value(Json::objectValue),
-      const RedexOptions& options = RedexOptions{});
+  explicit PassManager(const std::vector<Pass*>& passes);
+  explicit PassManager(const std::vector<Pass*>& passes,
+                       const Json::Value& config,
+                       const RedexOptions& options = RedexOptions{});
 
   PassManager(const std::vector<Pass*>& passes,
+              std::unique_ptr<keep_rules::ProguardConfiguration> pg_config);
+  PassManager(const std::vector<Pass*>& passes,
               std::unique_ptr<keep_rules::ProguardConfiguration> pg_config,
-              const Json::Value& config = Json::Value(Json::objectValue),
+              const Json::Value& config,
               const RedexOptions& options = RedexOptions{});
+
+  ~PassManager();
 
   struct PassInfo {
     const Pass* pass;
@@ -87,14 +103,16 @@ class PassManager {
     return nullptr;
   }
 
+  Pass* find_pass(const std::string& pass_name) const;
+
  private:
   void activate_pass(const std::string& name, const Json::Value& cfg);
-
-  Pass* find_pass(const std::string& pass_name) const;
 
   void init(const Json::Value& config);
 
   hashing::DexHash run_hasher(const char* name, const Scope& scope);
+
+  void eval_passes(DexStoresVector&, ConfigFiles&);
 
   ApkManager m_apk_mgr;
   std::vector<Pass*> m_registered_passes;
@@ -110,22 +128,7 @@ class PassManager {
   bool m_testing_mode{false};
   bool m_regalloc_has_run{false};
 
-  struct ProfilerInfo {
-    std::string command;
-    boost::optional<std::string> shutdown_cmd;
-    boost::optional<std::string> post_cmd;
-    const Pass* pass;
-    ProfilerInfo(const std::string& command,
-                 const boost::optional<std::string>& shutdown_cmd,
-                 const boost::optional<std::string>& post_cmd,
-                 const Pass* pass)
-        : command(command),
-          shutdown_cmd(shutdown_cmd),
-          post_cmd(post_cmd),
-          pass(pass) {}
-  };
-
-  boost::optional<ProfilerInfo> m_profiler_info;
   Pass* m_malloc_profile_pass{nullptr};
+
   boost::optional<hashing::DexHash> m_initial_hash;
 };

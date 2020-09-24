@@ -10,9 +10,10 @@
 #include <cstdint>
 #include <string>
 
-#include "Show.h"
-
 class DexField;
+class DexMethod;
+class DexMethodRef;
+class DexType;
 
 enum DexOpcode : uint16_t;
 
@@ -180,7 +181,7 @@ IROpcode pseudo_to_move_result(IROpcode op);
 
 IROpcode sget_opcode_for_field(const DexField* field);
 
-enum Branchingness {
+enum Branchingness : uint8_t {
   BRANCH_NONE,
   BRANCH_RETURN,
   BRANCH_GOTO,

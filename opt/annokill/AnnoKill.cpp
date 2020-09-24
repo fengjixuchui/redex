@@ -13,7 +13,9 @@
 #include "DexLoader.h"
 #include "DexOutput.h"
 #include "DexUtil.h"
+#include "PassManager.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "Walkers.h"
 
 constexpr const char* METRIC_ANNO_KILLED = "num_anno_killed";

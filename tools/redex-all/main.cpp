@@ -40,6 +40,7 @@
 #include "DexHasher.h"
 #include "DexLoader.h"
 #include "DexOutput.h"
+#include "DexPosition.h"
 #include "DuplicateClasses.h"
 #include "GlobalConfig.h"
 #include "IODIMetadata.h"
@@ -358,8 +359,7 @@ Arguments parse_args(int argc, char* argv[]) {
   if (vm.count("reflect-config")) {
     Json::Value reflected_config;
 
-    GlobalConfig gc;
-    reflected_config["global"] = reflect_config(gc.reflect());
+    reflected_config["global"] = reflect_config(GlobalConfig::get().reflect());
 
     Json::Value pass_configs = Json::arrayValue;
     const auto& passes = PassRegistry::get().get_passes();
@@ -1104,6 +1104,8 @@ int main(int argc, char* argv[]) {
 
   // Only log one assert.
   block_multi_asserts(/*block=*/true);
+  // For better stacks in abort dumps.
+  set_abort_if_not_this_thread();
 
   std::string stats_output_path;
   Json::Value stats;
@@ -1148,6 +1150,7 @@ int main(int argc, char* argv[]) {
     }
 
     redex_frontend(conf, args, *pg_config, stores, stats);
+    GlobalConfig::get().parse_config(conf.get_json_config());
 
     // Initialize purity defaults, if set.
     purity::CacheConfig::parse_default(conf);

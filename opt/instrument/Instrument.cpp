@@ -13,12 +13,14 @@
 #include "InterDexPassPlugin.h"
 #include "Match.h"
 #include "MethodReference.h"
+#include "PassManager.h"
 #include "Show.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
 
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>

@@ -12,18 +12,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <json/json.h>
+#include <json/value.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 
 #include "DexClass.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "EditableCfgAdapter.h"
 #include "IRCode.h"
 #include "OptDataDefs.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "Trace.h"
 
 namespace {

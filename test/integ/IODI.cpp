@@ -16,10 +16,13 @@
 #include "DexEncoding.h"
 #include "DexLoader.h"
 #include "DexOutput.h"
+#include "DexPosition.h"
 #include "IODIMetadata.h"
 #include "InstructionLowering.h"
 #include "RedexContext.h"
 #include "SanitizersConfig.h"
+#include "Show.h"
+#include "StlUtil.h"
 #include "Walkers.h"
 
 struct DexOutputTestHelper {
@@ -94,13 +97,7 @@ DexClasses run_redex(std::unordered_map<std::string, uint64_t>* mid = nullptr,
         always_assert(res.second);
       }
     }
-    for (auto it = mid->begin(); it != mid->end();) {
-      if (it->second == 0) {
-        it = mid->erase(it);
-      } else {
-        it++;
-      }
-    }
+    std20::erase_if(*mid, [](auto it) { return it->second == 0; });
   }
   if (iodi_data) {
     std::stringstream sstream;

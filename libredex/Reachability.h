@@ -74,6 +74,7 @@ struct ReachableObjectHash {
 
 struct IgnoreSets {
   IgnoreSets() = default;
+  std::unordered_set<const DexMethodRef*> methods;
   std::unordered_set<const DexType*> string_literals;
   std::unordered_set<const DexType*> string_literal_annos;
   std::unordered_set<const DexType*> system_annos;
@@ -160,6 +161,9 @@ struct References {
   std::vector<DexType*> types;
   std::vector<DexFieldRef*> fields;
   std::vector<DexMethodRef*> methods;
+  // Conditional method references. They are already resolved DexMethods
+  // conditionally reachable at virtual call sites.
+  std::vector<const DexMethod*> cond_methods;
 };
 
 // Each thread will have its own instance of Stats, so align it in order to
@@ -205,8 +209,14 @@ class RootSetMarker {
    */
   void mark(const Scope& scope);
 
+  /*
+   * Mark all DexMethods (and their respective classes) as seeds.
+   */
+  void mark_methods_as_seed(
+      const std::unordered_set<const DexMethod*>& members);
+
   /**
-   * marks everything as seed
+   * Mark everything as seed.
    */
   void mark_all_as_seed(const Scope& scope);
 
@@ -269,6 +279,10 @@ class TransitiveClosureMarker {
 
   virtual void visit_cls(const DexClass* cls);
 
+  virtual void visit_method_ref(const DexMethodRef* method);
+
+  void visit_field_ref(const DexFieldRef* field);
+
   virtual References gather(const DexAnnotation* anno) const;
 
   virtual References gather(const DexMethod* method) const;
@@ -278,7 +292,9 @@ class TransitiveClosureMarker {
   template <class Parent>
   void push(const Parent* parent, const DexType* type);
 
- private:
+  void push(const DexMethodRef* parent, const DexType* type);
+
+ protected:
   template <class Parent, class InputIt>
   void push(const Parent* parent, InputIt begin, InputIt end);
 
@@ -290,6 +306,8 @@ class TransitiveClosureMarker {
 
   template <class Parent>
   void push(const Parent* parent, const DexMethodRef* method);
+
+  void push(const DexMethodRef* parent, const DexMethodRef* method);
 
   void push_cond(const DexMethod* method);
 
@@ -304,12 +322,15 @@ class TransitiveClosureMarker {
   void push_typelike_strings(const Parent* parent,
                              const std::vector<DexString*>& strings);
 
-  void visit(const DexFieldRef* field);
-
-  void visit(const DexMethodRef* method);
-
   template <class Parent, class Object>
   void record_reachability(Parent* parent, Object* object);
+
+  /*
+   * Resolve the method reference more conservatively without the context of the
+   * call, such as call instruction, target type and the caller method.
+   */
+  static DexMethod* resolve_without_context(const DexMethodRef* method,
+                                            const DexClass* cls);
 
   const IgnoreSets& m_ignore_sets;
   const method_override_graph::Graph& m_method_override_graph;
@@ -322,6 +343,22 @@ class TransitiveClosureMarker {
   static DexMethodRef* s_class_forname;
 };
 
+/*
+ * Compute all reachable objects from the provided seeds only.
+ */
+std::unique_ptr<ReachableObjects> compute_reachable_objects(
+    const DexStoresVector& stores,
+    const IgnoreSets& ignore_sets,
+    int* num_ignore_check_strings,
+    const std::unordered_set<const DexMethod*>& seeds,
+    bool record_reachability = false,
+    std::unique_ptr<const method_override_graph::Graph>*
+        out_method_override_graph = nullptr);
+
+/*
+ * Compute all reachable objects from the existing configurations
+ * (e.g. proguard rules).
+ */
 std::unique_ptr<ReachableObjects> compute_reachable_objects(
     const DexStoresVector& stores,
     const IgnoreSets& ignore_sets,
@@ -330,6 +367,12 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
     bool should_mark_all_as_seed = false,
     std::unique_ptr<const method_override_graph::Graph>*
         out_method_override_graph = nullptr);
+
+/*
+ * Compute all reachable methods from the set of reachable objects.
+ */
+std::unordered_set<DexMethod*> compute_reachable_methods(
+    DexStoresVector& stores, const ReachableObjects& reachables);
 
 void sweep(DexStoresVector& stores,
            const ReachableObjects& reachables,

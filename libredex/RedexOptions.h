@@ -5,7 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include <json/json.h>
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+namespace Json {
+class Value;
+} // namespace Json
 
 enum Architecture {
   UNKNOWN,

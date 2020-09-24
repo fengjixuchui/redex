@@ -7,12 +7,16 @@
 
 #include "IPReflectionAnalysis.h"
 
+#include <fstream>
+
 #include "AbstractDomain.h"
 #include "CallGraph.h"
+#include "ConfigFiles.h"
 #include "MethodOverrideGraph.h"
 #include "PatriciaTreeMapAbstractEnvironment.h"
 #include "PatriciaTreeMapAbstractPartition.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "SpartaInterprocedural.h"
 
 namespace {

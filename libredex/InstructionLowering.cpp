@@ -6,6 +6,13 @@
  */
 
 #include "InstructionLowering.h"
+
+#include "Debug.h"
+#include "DexInstruction.h"
+#include "DexOpcodeDefs.h"
+#include "DexStore.h"
+#include "IRInstruction.h"
+#include "Show.h"
 #include "Walkers.h"
 
 namespace instruction_lowering {

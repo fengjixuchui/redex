@@ -13,18 +13,19 @@
 
 #include "ConfigFiles.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "DexStats.h"
 #include "DexUtil.h"
 #include "Pass.h"
 #include "PostLowering.h"
 #include "ProguardMap.h"
+#include "RedexOptions.h"
 #include "Trace.h"
 
 #include <locator.h>
 using facebook::Locator;
 
 class DexCallSite;
-class DexMethodHandle;
 
 using dexstring_to_idx = std::unordered_map<DexString*, uint32_t>;
 using dextype_to_idx = std::unordered_map<DexType*, uint16_t>;

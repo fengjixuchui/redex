@@ -7,12 +7,14 @@
 
 #include "ObjectSensitiveDcePass.h"
 
+#include <fstream>
 #include <functional>
 
 #include "ConcurrentContainers.h"
 #include "DexUtil.h"
 #include "HierarchyUtil.h"
 #include "LocalPointersAnalysis.h"
+#include "PassManager.h"
 #include "SummarySerialization.h"
 #include "Transform.h"
 #include "Walkers.h"

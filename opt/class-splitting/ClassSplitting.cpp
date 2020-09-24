@@ -34,9 +34,12 @@
 #include "IRInstruction.h"
 #include "InterDexPass.h"
 #include "MethodOverrideGraph.h"
+#include "MethodProfiles.h"
 #include "Mutators.h"
+#include "PassManager.h"
 #include "PluginRegistry.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "Walkers.h"
 
 namespace {

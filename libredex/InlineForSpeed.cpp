@@ -11,6 +11,8 @@
 #include "IRCode.h"
 #include "MethodProfiles.h"
 #include "Resolver.h"
+#include "Show.h"
+#include "Trace.h"
 
 #include <queue>
 

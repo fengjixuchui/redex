@@ -7,8 +7,11 @@
 
 #include "GlobalTypeAnalysisPass.h"
 
+#include "ConfigFiles.h"
 #include "DexUtil.h"
 #include "GlobalTypeAnalyzer.h"
+#include "Show.h"
+#include "Trace.h"
 #include "TypeAnalysisTransform.h"
 #include "TypeInference.h"
 #include "Walkers.h"

@@ -9,9 +9,12 @@
 
 #include "AnnoUtils.h"
 #include "ApproximateShapeMerging.h"
+#include "ConfigFiles.h"
 #include "DexStoreUtil.h"
+#include "PassManager.h"
 #include "RefChecker.h"
 #include "Resolver.h"
+#include "Show.h"
 #include "Walkers.h"
 
 using namespace class_merging;
@@ -399,14 +402,15 @@ void Model::create_mergers_helper(
     for (auto it = group_values.begin(); it != group_values.end(); ++it) {
       auto mergeable = *it;
       curr_group.insert(mergeable);
-      if (((curr_group.size() == *max_mergeables_count &&
-            remaining_mergeable_cnt - *max_mergeables_count > 1) ||
-           std::next(it) == group_values.end()) &&
-          curr_group.size() >= min_mergeables_count) {
-        create_merger_helper(
-            merger_type, shape, group_key, curr_group, interdex_subgroup_idx,
-            boost::optional<InterdexSubgroupIdx>(subgroup_cnt++));
-        remaining_mergeable_cnt -= curr_group.size();
+      if ((curr_group.size() == *max_mergeables_count &&
+           remaining_mergeable_cnt - *max_mergeables_count > 1) ||
+          std::next(it) == group_values.end()) {
+        if (curr_group.size() >= min_mergeables_count) {
+          create_merger_helper(
+              merger_type, shape, group_key, curr_group, interdex_subgroup_idx,
+              boost::optional<InterdexSubgroupIdx>(subgroup_cnt++));
+          remaining_mergeable_cnt -= curr_group.size();
+        }
         curr_group.clear();
       }
     }
@@ -769,7 +773,11 @@ void Model::break_by_interface(const MergerType& merger,
 
 namespace {
 
-DexType* check_current_instance(const TypeSet& types, IRInstruction* insn) {
+using TypeHashSet = std::unordered_set<DexType*>;
+using ConstTypeHashSet = std::unordered_set<const DexType*>;
+
+DexType* check_current_instance(const ConstTypeHashSet& types,
+                                IRInstruction* insn) {
   DexType* type = nullptr;
   if (insn->has_type()) {
     type = insn->get_type();
@@ -786,9 +794,9 @@ DexType* check_current_instance(const TypeSet& types, IRInstruction* insn) {
   return type;
 }
 
-ConcurrentMap<DexType*, std::unordered_set<DexType*>> get_type_usages(
-    const TypeSet& types, const Scope& scope) {
-  ConcurrentMap<DexType*, std::unordered_set<DexType*>> res;
+ConcurrentMap<DexType*, TypeHashSet> get_type_usages(
+    const ConstTypeHashSet& types, const Scope& scope) {
+  ConcurrentMap<DexType*, TypeHashSet> res;
 
   walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
     auto cls = method->get_class();
@@ -825,7 +833,7 @@ ConcurrentMap<DexType*, std::unordered_set<DexType*>> get_type_usages(
 }
 
 size_t get_interdex_group(
-    const std::unordered_set<DexType*>& types,
+    const TypeHashSet& types,
     const std::unordered_map<DexType*, size_t>& cls_to_interdex_groups,
     size_t interdex_groups) {
   // By default, we consider the class in the last group.
@@ -844,7 +852,8 @@ size_t get_interdex_group(
 namespace class_merging {
 
 std::vector<TypeSet> Model::group_per_interdex_set(const TypeSet& types) {
-  const auto& type_to_usages = get_type_usages(types, m_scope);
+  ConstTypeHashSet type_hash_set{types.begin(), types.end()};
+  const auto& type_to_usages = get_type_usages(type_hash_set, m_scope);
   std::vector<TypeSet> new_groups(s_num_interdex_groups);
   for (const auto& pair : type_to_usages) {
     auto index = get_interdex_group(pair.second, s_cls_to_interdex_group,
@@ -1209,6 +1218,8 @@ void Model::distribute_virtual_methods(
     }
   }
 }
+
+std::string Model::show_type(const DexType* type) { return show(type); }
 
 std::string Model::print() const {
   size_t count{0};

@@ -10,17 +10,21 @@
 #include <bitset>
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
+#include <iostream>
 #include <limits>
 
 #include "BaseIRAnalyzer.h"
 #include "CFGMutation.h"
+#include "ConfigFiles.h"
 #include "ConstantAbstractDomain.h"
 #include "ControlFlow.h"
 #include "IRInstruction.h"
 #include "MethodProfiles.h"
+#include "PassManager.h"
 #include "PatriciaTreeMapAbstractEnvironment.h"
 #include "ReachingDefinitions.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
 

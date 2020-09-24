@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include "DexOutput.h"
+
 #include <algorithm>
 #include <assert.h>
 #include <exception>
@@ -33,16 +35,19 @@
 #include "Debug.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexInstruction.h"
 #include "DexLimits.h"
 #include "DexMethodHandle.h"
-#include "DexOutput.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IODIMetadata.h"
 #include "IRCode.h"
 #include "Macros.h"
+#include "MethodProfiles.h"
 #include "Pass.h"
 #include "Resolver.h"
 #include "Sha1.h"
+#include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
 #include "WorkQueue.h"
@@ -791,7 +796,7 @@ void DexOutput::generate_type_data() {
       dodx->type_to_idx().size() < get_max_type_refs(m_min_sdk),
       "Trying to encode too many type refs in dex %lu: %lu (limit: %lu).\n"
       "NOTE: Please check InterDexPass config flags and set: "
-      "`reserve_trefs: %lu` (or larger, until the issue goes away)",
+      "`reserved_trefs: %lu` (or larger, until the issue goes away)",
       m_dex_number,
       dodx->type_to_idx().size(),
       get_max_type_refs(m_min_sdk),
