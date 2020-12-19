@@ -67,11 +67,13 @@ check_PROGRAMS = \
     local_pointers_test \
     loop_info_test \
     loosen_access_modifier_test \
+    match_flow_test \
     match_test \
     method_inline_test \
     method_merger_test \
     monitor_count_test \
     mutf8_compare_test \
+    leb_test \
     null_propagation_test \
     object_inliner_test \
     object_propagation_test \
@@ -84,6 +86,7 @@ check_PROGRAMS = \
     proguard_parser_test \
     proguard_regex_test \
     pure_analysis_test \
+    random_forest_test \
     reaching_definitions_test \
     reduce_array_literals_test \
     reduce_gotos_test \
@@ -99,6 +102,7 @@ check_PROGRAMS = \
     remove_unused_args_test \
     renamer_test \
     resolver_test \
+    resolve_proguard_value_test \
     result_propagation_test \
     side_effects_summary_test \
     signed_constant_propagation_test \
@@ -246,6 +250,9 @@ loosen_access_modifier_test_SOURCES = LoosenAccessModifierTest.cpp
 
 match_test_SOURCES = MatchTest.cpp
 
+match_flow_test_SOURCES = MatchFlowTest.cpp
+match_flow_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
 method_inline_test_SOURCES = MethodInlineTest.cpp
 
 method_merger_test_SOURCES = MethodMergerTest.cpp
@@ -253,6 +260,8 @@ method_merger_test_SOURCES = MethodMergerTest.cpp
 monitor_count_test_SOURCES = MonitorCountTest.cpp
 
 mutf8_compare_test_SOURCES = Mutf8CompareTest.cpp
+
+leb_test_SOURCES = LebTest.cpp
 
 null_propagation_test_SOURCES = constant-propagation/NullPropagationTest.cpp
 
@@ -282,6 +291,8 @@ proguard_regex_test_SOURCES = ProguardRegexTest.cpp
 
 pure_analysis_test_SOURCES = PureAnalysisTest.cpp
 pure_analysis_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+random_forest_test_SOURCES = RandomForestTest.cpp
 
 reaching_definitions_test_SOURCES = ReachingDefinitionsTest.cpp
 
@@ -319,6 +330,7 @@ remove_unused_args_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 renamer_test_SOURCES = RenamerTest.cpp VirtScopeHelper.cpp ScopeHelper.cpp
 
 resolver_test_SOURCES = ResolverTest.cpp
+resolve_proguard_value_test_SOURCES = ResolveProguardAssumeValuesTest.cpp ScopeHelper.cpp
 
 result_propagation_test_SOURCES = ResultPropagationTest.cpp
 result_propagation_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
@@ -380,7 +392,6 @@ work_queue_test_SOURCES = WorkQueueTest.cpp
 
 xstorerefs_test_SOURCES = XStoreRefsTest.cpp
 
-resolve_proguard_value_test_SOURCES = ResolveProguardAssumeValuesTest.cpp
 
 TESTS = \
     aliased_registers_test \
@@ -436,11 +447,13 @@ TESTS = \
     local_pointers_test \
     loop_info_test \
     loosen_access_modifier_test \
+    match_flow_test \
     match_test \
     method_inline_test \
     method_merger_test \
     monitor_count_test \
     mutf8_compare_test \
+    leb_test \
     null_propagation_test \
     object_inliner_test \
     object_propagation_test \
@@ -453,6 +466,7 @@ TESTS = \
     proguard_parser_test \
     proguard_regex_test \
     pure_analysis_test \
+    random_forest_test \
     reaching_definitions_test \
     reduce_array_literals_test \
     reduce_gotos_test \
@@ -468,6 +482,7 @@ TESTS = \
     remove_unused_args_test \
     renamer_test \
     resolver_test \
+    resolve_proguard_value_test \
     result_propagation_test \
     side_effects_summary_test \
     signed_constant_propagation_test \
@@ -489,5 +504,4 @@ TESTS = \
     virtual_merging_test \
     walkers_test \
     work_queue_test \
-    xstorerefs_test \
-    resolve_proguard_value_test
+    xstorerefs_test

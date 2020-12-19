@@ -9,6 +9,8 @@
 
 #include "ControlFlow.h"
 
+struct RedexTest;
+
 namespace ab_test {
 
 /**
@@ -24,6 +26,8 @@ enum class ABExperimentPreferredMode { PREFER_CONTROL, PREFER_TEST };
  * actually be visible (i.e. applied) or not, depending on its setup.
  */
 class ABExperimentContext {
+  friend RedexTest;
+
  public:
   static std::unique_ptr<ABExperimentContext> create(
       cfg::ControlFlowGraph* cfg,
@@ -47,7 +51,6 @@ class ABExperimentContext {
    */
   static void force_preferred_mode();
 
- private:
   /**
    * Forces all ABExperimentContext instances to apply changes happening
    * to the CFG when flushing. This should only be used at the beginning of
@@ -55,9 +58,12 @@ class ABExperimentContext {
    * avoid the control logic.
    * NOTE: this can only be used as long as no ABExperimentContext instance
    * exists.
+   * TODO(T80501167): This is made public temporarily to solve an issue with a
+   * failing test. Find a better solution for that.
    */
   static void force_test_mode();
 
+ private:
   /**
    * Forces all ABExperimentContext instances to ignore changes happening
    * to the CFG when flushing. This should only be used at the beginning of
@@ -70,7 +76,5 @@ class ABExperimentContext {
    * exists.
    */
   static void force_control_mode();
-
-  friend class ABExperimentContextTest;
 };
 } // namespace ab_test

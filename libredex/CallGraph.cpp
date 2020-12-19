@@ -11,6 +11,7 @@
 
 #include "ConcurrentContainers.h"
 #include "MethodOverrideGraph.h"
+#include "Show.h"
 #include "Walkers.h"
 
 namespace mog = method_override_graph;
@@ -57,16 +58,16 @@ CallSites SingleCalleeStrategy::get_callsites(const DexMethod* method) const {
   return callsites;
 }
 
-std::vector<const DexMethod*> SingleCalleeStrategy::get_roots() const {
-  std::vector<const DexMethod*> roots;
-
+RootAndDynamic SingleCalleeStrategy::get_roots() const {
+  RootAndDynamic root_and_dynamic;
+  auto& roots = root_and_dynamic.roots;
   walk::code(m_scope, [&](DexMethod* method, IRCode& /* code */) {
     if (is_definitely_virtual(method) || root(method) ||
         method::is_clinit(method)) {
       roots.emplace_back(method);
     }
   });
-  return roots;
+  return root_and_dynamic;
 }
 
 bool SingleCalleeStrategy::is_definitely_virtual(DexMethod* method) const {
@@ -83,9 +84,11 @@ MultipleCalleeBaseStrategy::MultipleCalleeBaseStrategy(const Scope& scope)
     : SingleCalleeStrategy(scope),
       m_method_override_graph(mog::build_graph(scope)) {}
 
-std::vector<const DexMethod*> MultipleCalleeBaseStrategy::get_roots() const {
-  std::vector<const DexMethod*> roots;
+RootAndDynamic MultipleCalleeBaseStrategy::get_roots() const {
+  RootAndDynamic root_and_dynamic;
   MethodSet emplaced_methods;
+  auto& roots = root_and_dynamic.roots;
+  auto& dynamic_methods = root_and_dynamic.dynamic_methods;
   // Gather clinits and root methods, and the methods that override or
   // overriden by the root methods.
   auto add_root_method_overrides = [&](const DexMethod* method) {
@@ -112,7 +115,11 @@ std::vector<const DexMethod*> MultipleCalleeBaseStrategy::get_roots() const {
       // overriden to roots.
       return;
     }
-    if (!emplaced_methods.count(method)) {
+    if (method->is_virtual() && is_interface(type_class(method->get_class())) &&
+        !can_rename(method)) {
+      dynamic_methods.emplace(method);
+    }
+    if (!emplaced_methods.count(method) && method->get_code()) {
       roots.emplace_back(method);
       emplaced_methods.emplace(method);
     }
@@ -133,10 +140,15 @@ std::vector<const DexMethod*> MultipleCalleeBaseStrategy::get_roots() const {
     if (!method->is_external()) {
       continue;
     }
+    dynamic_methods.emplace(method);
     const auto& overriding_methods =
         mog::get_overriding_methods(*m_method_override_graph, method);
     for (auto* overriding : overriding_methods) {
-      if (!overriding->is_external() && !emplaced_methods.count(overriding)) {
+      if (overriding->is_external()) {
+        dynamic_methods.emplace(method);
+      }
+      if (!overriding->is_external() && !emplaced_methods.count(overriding) &&
+          overriding->get_code()) {
         roots.emplace_back(overriding);
         emplaced_methods.emplace(overriding);
       }
@@ -145,11 +157,34 @@ std::vector<const DexMethod*> MultipleCalleeBaseStrategy::get_roots() const {
   // Add additional roots if needed.
   auto additional_roots = get_additional_roots(emplaced_methods);
   roots.insert(roots.end(), additional_roots.begin(), additional_roots.end());
-  return roots;
+  return root_and_dynamic;
 }
 
 CompleteCallGraphStrategy::CompleteCallGraphStrategy(const Scope& scope)
     : MultipleCalleeBaseStrategy(scope) {}
+
+DexMethod* resolve_interface_virtual_callee(const IRInstruction* insn,
+                                            const DexMethod* caller,
+                                            MethodRefCache& ref_cache,
+                                            bool use_cache) {
+  DexMethod* callee = nullptr;
+  if (opcode_to_search(insn) == MethodSearch::Virtual) {
+    callee = use_cache ? resolve_method(insn->get_method(),
+                                        MethodSearch::InterfaceVirtual,
+                                        ref_cache,
+                                        caller)
+                       : resolve_method(insn->get_method(),
+                                        MethodSearch::InterfaceVirtual,
+                                        caller);
+    if (callee == nullptr) {
+      auto insn_method_cls = type_class(insn->get_method()->get_class());
+      if (insn_method_cls != nullptr && !insn_method_cls->is_external()) {
+        fprintf(stderr, "Unexpected unresolved insn %s", SHOW(insn));
+      }
+    }
+  }
+  return callee;
+}
 
 CallSites CompleteCallGraphStrategy::get_callsites(
     const DexMethod* method) const {
@@ -163,7 +198,11 @@ CallSites CompleteCallGraphStrategy::get_callsites(
     if (opcode::is_an_invoke(insn->opcode())) {
       auto callee = this->resolve_callee(method, insn);
       if (callee == nullptr) {
-        continue;
+        callee = resolve_interface_virtual_callee(
+            insn, method, m_resolved_refs, /* use_cache */ true);
+        if (callee == nullptr) {
+          continue;
+        }
       }
       if (callee->is_concrete()) {
         callsites.emplace_back(callee, code->iterator_to(mie));
@@ -179,15 +218,15 @@ CallSites CompleteCallGraphStrategy::get_callsites(
   return callsites;
 }
 
-std::vector<const DexMethod*> CompleteCallGraphStrategy::get_roots() const {
-  std::vector<const DexMethod*> roots;
-
+RootAndDynamic CompleteCallGraphStrategy::get_roots() const {
+  RootAndDynamic root_and_dynamic;
+  auto& roots = root_and_dynamic.roots;
   walk::methods(m_scope, [&](DexMethod* method) {
     if (root(method) || method::is_clinit(method)) {
       roots.emplace_back(method);
     }
   });
-  return roots;
+  return root_and_dynamic;
 }
 
 MultipleCalleeStrategy::MultipleCalleeStrategy(const Scope& scope,
@@ -201,7 +240,14 @@ MultipleCalleeStrategy::MultipleCalleeStrategy(const Scope& scope,
       if (opcode::is_an_invoke(insn->opcode())) {
         auto callee =
             resolve_method(insn->get_method(), opcode_to_search(insn), method);
-        if (callee == nullptr || !callee->is_virtual()) {
+        if (callee == nullptr) {
+          callee = resolve_interface_virtual_callee(
+              insn, method, m_resolved_refs, /* use_cache */ false);
+          if (callee == nullptr) {
+            continue;
+          }
+        }
+        if (!callee->is_virtual()) {
           continue;
         }
         const auto& overriding_methods =
@@ -237,7 +283,11 @@ CallSites MultipleCalleeStrategy::get_callsites(const DexMethod* method) const {
     if (opcode::is_an_invoke(insn->opcode())) {
       auto callee = this->resolve_callee(method, insn);
       if (callee == nullptr) {
-        continue;
+        callee = resolve_interface_virtual_callee(
+            insn, method, m_resolved_refs, /* use_cache */ true);
+        if (callee == nullptr) {
+          continue;
+        }
       }
       if (is_definitely_virtual(callee)) {
         // For true virtual callees, add the callee itself and all of its
@@ -252,7 +302,9 @@ CallSites MultipleCalleeStrategy::get_callsites(const DexMethod* method) const {
           const auto& overriding_methods =
               mog::get_overriding_methods(*m_method_override_graph, callee);
           for (auto overriding_method : overriding_methods) {
-            callsites.emplace_back(overriding_method, code->iterator_to(mie));
+            if (overriding_method->get_code()) {
+              callsites.emplace_back(overriding_method, code->iterator_to(mie));
+            }
           }
         }
       } else if (callee->is_concrete()) {
@@ -268,7 +320,8 @@ std::vector<const DexMethod*> MultipleCalleeStrategy::get_additional_roots(
     const MethodSet& existing_roots) const {
   std::vector<const DexMethod*> additional_roots;
   for (auto method : m_big_override) {
-    if (!method->is_external() && !existing_roots.count(method)) {
+    if (!method->is_external() && !existing_roots.count(method) &&
+        method->get_code()) {
       additional_roots.emplace_back(method);
     }
   }
@@ -285,7 +338,9 @@ Graph::Graph(const BuildStrategy& strat)
       m_exit(std::make_shared<Node>(Node::GHOST_EXIT)) {
   // Add edges from the single "ghost" entry node to all the "real" entry
   // nodes in the graph.
-  auto roots = strat.get_roots();
+  auto root_and_dynamic = strat.get_roots();
+  const auto& roots = root_and_dynamic.roots;
+  m_dynamic_methods = std::move(root_and_dynamic.dynamic_methods);
   for (const DexMethod* root : roots) {
     auto edge =
         std::make_shared<Edge>(m_entry, make_node(root), IRList::iterator());
@@ -309,6 +364,7 @@ Graph::Graph(const BuildStrategy& strat)
       for (const auto& callsite : callsites) {
         this->add_edge(
             make_node(caller), make_node(callsite.callee), callsite.invoke);
+        m_insn_to_callee[callsite.invoke->insn].emplace(callsite.callee);
         visit_fn(callsite.callee, visit_fn);
       }
     };
@@ -354,6 +410,20 @@ MethodSet resolve_callees_in_graph(const Graph& graph,
     }
   }
   return ret;
+}
+
+MethodSet resolve_callees_in_graph(const Graph& graph,
+                                   const IRInstruction* insn) {
+  MethodSet ret;
+  const auto& insn_to_callee = graph.get_insn_to_callee();
+  if (insn_to_callee.count(insn)) {
+    ret = insn_to_callee.at(insn);
+  }
+  return ret;
+}
+
+bool method_is_dynamic(const Graph& graph, const DexMethod* method) {
+  return graph.get_dynamic_methods().count(method);
 }
 
 CallgraphStats get_num_nodes_edges(const Graph& graph) {

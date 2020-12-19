@@ -7,51 +7,50 @@
 
 package com.facebook.redextest;
 
+import com.facebook.proguard.annotations.DoNotStrip;
+import java.util.concurrent.atomic.AtomicInteger;
+
 public class InstrumentBasicBlockAnalysis {
 
-  private static final int[] sBasicBlockStats = new int[0];
+  // InstrumentPass will patch.
+  @DoNotStrip private static final short[] sMethodStats = new short[0];
+  @DoNotStrip private static short[][] sMethodStatsArray = new short[][] {}; // Redex will patch
+  @DoNotStrip private static int sNumStaticallyInstrumented = 0;
+  @DoNotStrip private static int sProfileType = 0;
 
-  public static void onMethodExitBB(int methodId, int bbVector) {
-    sBasicBlockStats[methodId] |= bbVector;
+  @DoNotStrip private static boolean sIsEnabled = true;
+  @DoNotStrip private static AtomicInteger sMethodCounter = new AtomicInteger(0);
+
+  @DoNotStrip
+  public static void onMethodBegin(int offset) {
+    if (sIsEnabled) {
+      ++sMethodStats[offset];
+      if (sMethodStats[offset + 1] == 0) {
+        sMethodStats[offset + 1] = (short) sMethodCounter.incrementAndGet();
+      }
+    }
   }
 
-  public static void onMethodExitBB(int methodId, short bbVector1, short bbVector2) {
-    sBasicBlockStats[methodId] |= bbVector1;
-    sBasicBlockStats[methodId + 1] |= bbVector2;
+  public static void onMethodExit(int offset, short bitvec) {
+    if (sIsEnabled) {
+      sMethodStats[offset + 2] |= bitvec;
+    }
   }
 
-  public static void onMethodExitBB(
-      int methodId, short bbVector1, short bbVector2, short bbVector3) {
-    sBasicBlockStats[methodId] |= bbVector1;
-    sBasicBlockStats[methodId + 1] |= bbVector2;
-    sBasicBlockStats[methodId + 2] |= bbVector3;
+  @DoNotStrip
+  public static void onMethodExit(int offset, short bitvec1, short bitvec2) {
+    if (sIsEnabled) {
+      sMethodStats[offset + 2] |= bitvec1;
+      sMethodStats[offset + 3] |= bitvec2;
+    }
   }
 
-  public static void onMethodExitBB(
-      int methodId, short bbVector1, short bbVector2, short bbVector3, short bbVector4) {
-    sBasicBlockStats[methodId] |= bbVector1;
-    sBasicBlockStats[methodId + 1] |= bbVector2;
-    sBasicBlockStats[methodId + 2] |= bbVector3;
-    sBasicBlockStats[methodId + 3] |= bbVector4;
-  }
-
-  public static void onMethodExitBB(
-      int methodId,
-      short bbVector1,
-      short bbVector2,
-      short bbVector3,
-      short bbVector4,
-      short bbVector5) {
-    sBasicBlockStats[methodId] |= bbVector1;
-    sBasicBlockStats[methodId + 1] |= bbVector2;
-    sBasicBlockStats[methodId + 2] |= bbVector3;
-    sBasicBlockStats[methodId + 3] |= bbVector4;
-    sBasicBlockStats[methodId + 4] |= bbVector5;
-  }
-
-  public static void onMethodExitBB(int methodId, short[] bbVector) {
-    for (int i = 0; i < bbVector.length; i++) {
-      sBasicBlockStats[methodId + 1] |= bbVector[i];
+  @DoNotStrip
+  public static void onMethodExit(int offset, short bitvec1, short bitvec2, short bitvec3) {
+    if (sIsEnabled) {
+      sMethodStats[offset + 2] |= bitvec1;
+      sMethodStats[offset + 3] |= bitvec2;
+      sMethodStats[offset + 4] |= bitvec3;
     }
   }
 }

@@ -48,6 +48,7 @@ size_t count_invokes(const cfg::ControlFlowGraph& cfg,
 class InstructionSequenceOutlinerTest : public RedexIntegrationTest {};
 
 TEST_F(InstructionSequenceOutlinerTest, basic) {
+  force_experiments_test_mode();
   // Testing basic outlining, regardless of whether the outlined instruction
   // sequence is surrounded by some distractions
   std::vector<DexMethodRef*> println_methods;
@@ -101,6 +102,7 @@ TEST_F(InstructionSequenceOutlinerTest, basic) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, twice) {
+  force_experiments_test_mode();
   // Testing that there can be multiple outlined locations within a method.
   std::vector<DexMethod*> twice_methods;
   DexMethodRef* println_method = nullptr;
@@ -132,6 +134,7 @@ TEST_F(InstructionSequenceOutlinerTest, twice) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, in_try) {
+  force_experiments_test_mode();
   // Testing that we can outlined across a big block (consisting of several
   // individual blocks) surrounded by a try-catch.
   std::vector<DexMethod*> in_try_methods;
@@ -157,10 +160,16 @@ TEST_F(InstructionSequenceOutlinerTest, in_try) {
 
   for (auto m : in_try_methods) {
     cfg::ScopedCFG scoped_cfg(m->get_code());
-    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 0);
+    // TODO(T79690286): Change the number of expected println methods to 0 once
+    // we outline from methods with exceptions again
+    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 5);
     auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
-    EXPECT_NE(outlined_method, nullptr);
-    EXPECT_EQ(count_invokes(*scoped_cfg, outlined_method), 1);
+    // TODO(T79690286): Change to EXPECT_NE once we outline from methods with
+    // exceptions again
+    EXPECT_EQ(outlined_method, nullptr);
+    // TODO(T79690286): Change the number of outlined methods to 1 once we
+    // outline from methods with exceptions again
+    EXPECT_EQ(count_invokes(*scoped_cfg, outlined_method), 0);
   }
 }
 
@@ -819,6 +828,7 @@ TEST_F(InstructionSequenceOutlinerTest, cfg_with_object_arg) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, distributed) {
+  force_experiments_test_mode();
   // When outlined sequence occur in unrelated classes, the outlined method
   // it put into a generated helper class
   std::vector<DexMethod*> distributed_methods;

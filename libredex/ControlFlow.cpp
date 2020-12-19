@@ -405,6 +405,17 @@ bool Block::starts_with_move_result() {
   return false;
 }
 
+bool Block::starts_with_move_exception() {
+  auto first_it = get_first_insn();
+  if (first_it != end()) {
+    auto first_op = first_it->insn->opcode();
+    if (opcode::is_move_exception(first_op)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool Block::contains_opcode(IROpcode opcode) {
   for (auto it = begin(); it != end(); ++it) {
     if (it->type != MFLOW_OPCODE) {
@@ -1444,6 +1455,26 @@ InstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
   }
 
   auto iterable = InstructionIterable(*this);
+  for (auto it = iterable.begin(); it != iterable.end(); ++it) {
+    if (it->insn == needle) {
+      return it;
+    }
+  }
+  return iterable.end();
+}
+
+ConstInstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
+                                                     Block* hint) const {
+  if (hint != nullptr) {
+    auto ii = ir_list::InstructionIterable(hint);
+    for (auto it = ii.begin(); it != ii.end(); ++it) {
+      if (it->insn == needle) {
+        return hint->to_cfg_instruction_iterator(it);
+      }
+    }
+  }
+
+  auto iterable = ConstInstructionIterable(*this);
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
     if (it->insn == needle) {
       return it;

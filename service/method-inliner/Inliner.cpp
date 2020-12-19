@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <utility>
 
+#include "ABExperimentContext.h"
 #include "ApiLevelChecker.h"
 #include "CFGInliner.h"
 #include "ConcurrentContainers.h"
@@ -25,10 +26,12 @@
 #include "InlineForSpeed.h"
 #include "InlinerConfig.h"
 #include "LocalDce.h"
+#include "Macros.h"
 #include "MethodProfiles.h"
 #include "Mutators.h"
 #include "OptData.h"
 #include "Purity.h"
+#include "RegisterAllocation.h"
 #include "Resolver.h"
 #include "Timer.h"
 #include "Transform.h"
@@ -88,7 +91,7 @@ MultiMethodInliner::MultiMethodInliner(
     const inliner::InlinerConfig& config,
     MultiMethodInlinerMode mode /* default is InterDex */,
     const CalleeCallerInsns& true_virtual_callers,
-    const method_profiles::MethodProfiles* method_profiles,
+    InlineForSpeed* inline_for_speed,
     const std::unordered_map<const DexMethod*, size_t>*
         same_method_implementations,
     bool analyze_and_prune_inits,
@@ -98,7 +101,7 @@ MultiMethodInliner::MultiMethodInliner(
       m_scope(scope),
       m_config(config),
       m_mode(mode),
-      m_inline_for_speed(method_profiles),
+      m_inline_for_speed(inline_for_speed),
       m_same_method_implementations(same_method_implementations),
       m_pure_methods(get_pure_methods()),
       m_analyze_and_prune_inits(analyze_and_prune_inits) {
@@ -332,7 +335,7 @@ void MultiMethodInliner::inline_methods() {
       caller_nonrecursive_callees_by_stack_depth;
   for (const auto& it : caller_callee) {
     auto caller = it.first;
-    TraceContext context(caller->get_deobfuscated_name());
+    TraceContext context(caller);
     // if the caller is not a top level keep going, it will be traversed
     // when inlining a top level caller
     if (callee_caller.find(caller) != callee_caller.end()) continue;
@@ -457,7 +460,8 @@ size_t MultiMethodInliner::compute_caller_nonrecursive_callees_by_stack_depth(
 
     if (!for_speed()) {
       nonrecursive_callees.push_back(callee);
-    } else if (m_inline_for_speed.should_inline(caller, callee)) {
+    } else if (m_inline_for_speed != nullptr &&
+               m_inline_for_speed->should_inline(caller, callee)) {
       nonrecursive_callees.push_back(callee);
     }
 
@@ -474,6 +478,7 @@ size_t MultiMethodInliner::compute_caller_nonrecursive_callees_by_stack_depth(
 
 void MultiMethodInliner::caller_inline(
     DexMethod* caller, const std::vector<DexMethod*>& nonrecursive_callees) {
+  TraceContext context(caller);
   // We select callees to inline into this caller
   std::vector<DexMethod*> selected_callees;
   std::vector<DexMethod*> optional_selected_callees;
@@ -546,6 +551,7 @@ void MultiMethodInliner::inline_callees(
     DexMethod* caller,
     const std::vector<DexMethod*>& callees,
     const std::vector<DexMethod*>& optional_callees) {
+  TraceContext context{caller};
   size_t found = 0;
 
   // walk the caller opcodes collecting all candidates to inline
@@ -616,6 +622,7 @@ void MultiMethodInliner::inline_callees(
 
 void MultiMethodInliner::inline_callees(
     DexMethod* caller, const std::unordered_set<IRInstruction*>& insns) {
+  TraceContext context{caller};
   std::vector<Inlinable> inlinables;
   editable_cfg_adapter::iterate_with_iterator(
       caller->get_code(), [&](const IRList::iterator& it) {
@@ -692,6 +699,18 @@ void MultiMethodInliner::inline_inlinables(
     cfg_next_caller_reg = caller->cfg().get_registers_size();
   }
   size_t calls_not_inlinable{0}, calls_not_inlined{0};
+
+  std::unique_ptr<ab_test::ABExperimentContext> exp;
+  bool caller_had_editable_cfg = caller->editable_cfg_built();
+
+  if (for_speed()) {
+    if (!caller_had_editable_cfg) {
+      caller->build_cfg();
+    }
+    exp = ab_test::ABExperimentContext::create(&caller->cfg(), caller_method,
+                                               "pgi_v1");
+  }
+
   for (const auto& inlinable : ordered_inlinables) {
     auto callee_method = inlinable.callee;
     auto callee = callee_method->get_code();
@@ -707,9 +726,11 @@ void MultiMethodInliner::inline_inlinables(
     // the fact that we'll have to make some methods static.
     make_static_inlinable(make_static);
 
-    TRACE(MMINL, 4, "inline %s (%d) in %s (%d)", SHOW(callee),
-          caller->get_registers_size(), SHOW(caller),
-          callee->get_registers_size());
+    TRACE(MMINL, 4, "inline %s (%d) in %s (%d)",
+          callee->cfg_built() ? SHOW(callee->cfg()) : SHOW(callee),
+          callee->get_registers_size(),
+          caller->cfg_built() ? SHOW(caller->cfg()) : SHOW(caller),
+          caller->get_registers_size());
 
     if (m_config.use_cfg_inliner) {
       if (m_config.unique_inlined_registers) {
@@ -731,7 +752,9 @@ void MultiMethodInliner::inline_inlinables(
       always_assert(callsite->insn == callsite_insn);
       inliner::inline_method_unsafe(caller_method, caller, callee, callsite);
     }
-    TRACE(INL, 2, "caller: %s\tcallee: %s", SHOW(caller), SHOW(callee));
+    TRACE(INL, 2, "caller: %s\tcallee: %s",
+          caller->cfg_built() ? SHOW(caller->cfg()) : SHOW(caller),
+          SHOW(callee));
     estimated_insn_size += get_callee_insn_size(callee_method);
 
     inlined_callees.push_back(callee_method);
@@ -756,6 +779,13 @@ void MultiMethodInliner::inline_inlinables(
 
   for (IRCode* code : need_deconstruct) {
     code->clear_cfg();
+  }
+
+  if (exp != nullptr) {
+    exp->flush();
+    if (caller_had_editable_cfg) {
+      caller->build_cfg();
+    }
   }
 
   info.calls_inlined += inlined_callees.size();
@@ -853,6 +883,38 @@ void MultiMethodInliner::shrink_method(DexMethod* method) {
     local_dce_stats = local_dce.get_stats();
   }
 
+  if (m_config.run_reg_alloc) {
+    auto get_features = [&code]() -> std::tuple<size_t, size_t, size_t> {
+      if (!traceEnabled(MMINL, 4)) {
+        return std::make_tuple(0u, 0u, 0u);
+      }
+      if (!code->editable_cfg_built()) {
+        code->build_cfg(/* editable= */ true);
+      }
+      const auto& cfg = code->cfg();
+
+      size_t regs_before = cfg.get_registers_size();
+      size_t insn_before = cfg.num_opcodes();
+      size_t blocks_before = cfg.num_blocks();
+      return std::make_tuple(regs_before, insn_before, blocks_before);
+    };
+
+    // It's OK to ensure we have an editable CFG, the allocator would build it,
+    // too.
+    auto before_features = get_features();
+
+    regalloc::graph_coloring::allocate({}, method);
+    // After this, any CFG is gone.
+
+    // Assume that dedup will run, so building CFG is OK.
+    auto after_features = get_features();
+    TRACE(MMINL, 4, "Inliner.RegAlloc: %s: (%zu, %zu, %zu) -> (%zu, %zu, %zu)",
+          SHOW(method), std::get<0>(before_features),
+          std::get<1>(before_features), std::get<2>(before_features),
+          std::get<0>(after_features), std::get<1>(after_features),
+          std::get<2>(after_features));
+  }
+
   if (m_config.run_dedup_blocks) {
     if (!code->editable_cfg_built()) {
       code->build_cfg(/* editable */ true);
@@ -880,6 +942,7 @@ void MultiMethodInliner::shrink_method(DexMethod* method) {
 }
 
 void MultiMethodInliner::postprocess_method(DexMethod* method) {
+  TraceContext context(method);
   bool delayed_shrinking = false;
   bool is_callee = !!m_async_callee_priorities.count(method);
   if (m_shrinking_enabled && !method->rstate.no_optimizations()) {
@@ -982,6 +1045,7 @@ bool MultiMethodInliner::is_inlinable(const DexMethod* caller,
                                       const IRInstruction* insn,
                                       size_t estimated_insn_size,
                                       std::vector<DexMethod*>* make_static) {
+  TraceContext context{caller};
   // don't inline cross store references
   if (cross_store_reference(caller, callee)) {
     if (insn) {
@@ -1375,6 +1439,7 @@ size_t MultiMethodInliner::get_inlined_cost(const DexMethod* callee) {
     const auto& callee_constant_arguments =
         callee_constant_arguments_it->second;
     auto process_key = [&](const ConstantArgumentsOccurrences& cao) {
+      TraceContext context(callee);
       const auto& constant_arguments = cao.first;
       const auto count = cao.second;
       TRACE(INLINE, 5, "[too_many_callers] get_inlined_cost %s", SHOW(callee));
@@ -2229,6 +2294,7 @@ class MethodSplicer {
         return true;
       }
     }
+      FALLTHROUGH_INTENDED;
     default:
       return false;
     }

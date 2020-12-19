@@ -23,7 +23,7 @@ import sys
 import tempfile
 import timeit
 import zipfile
-from os.path import abspath, dirname, isdir, isfile, join
+from os.path import abspath, dirname, getsize, isdir, isfile, join
 from pipes import quote
 
 import pyredex.logger as logger
@@ -350,7 +350,22 @@ class SigIntHandler:
         signal.alarm(3)
 
 
-def run_redex_binary(state, term_handler):
+class ExceptionMessageFormatter:
+    def format_rerun_message(self, gdb_script_name, lldb_script_name):
+        return "You can re-run it under gdb by running {} or under lldb by running {}".format(
+            gdb_script_name, lldb_script_name
+        )
+
+    def format_message(
+        self, err_out, default_error_msg, gdb_script_name, lldb_script_name
+    ):
+        return "{} {}".format(
+            default_error_msg,
+            self.format_rerun_message(gdb_script_name, lldb_script_name),
+        )
+
+
+def run_redex_binary(state, term_handler, exception_formatter):
     if state.args.redex_binary is None:
         state.args.redex_binary = shutil.which("redex-all")
 
@@ -376,7 +391,7 @@ def run_redex_binary(state, term_handler):
     ]
 
     if state.args.cmd_prefix is not None:
-        args = state.args.cmd_prefix.split() + args
+        args = shlex.split(state.args.cmd_prefix) + args
 
     if state.args.config:
         args += ["--config", state.args.config]
@@ -475,10 +490,11 @@ def run_redex_binary(state, term_handler):
                 if returncode == -6:  # SIGABRT
                     maybe_reprint_error(err_out, term_handler)
 
+                default_error_msg = "redex-all crashed with exit code {}!".format(
+                    returncode
+                )
                 if IS_WINDOWS:
-                    raise RuntimeError(
-                        "redex-all crashed with exit code {}!".format(returncode)
-                    )
+                    raise RuntimeError(default_error_msg)
 
                 gdb_script_name = write_debugger_command(
                     "gdb", state.args.debug_source_root, args
@@ -486,12 +502,10 @@ def run_redex_binary(state, term_handler):
                 lldb_script_name = write_debugger_command(
                     "lldb", state.args.debug_source_root, args
                 )
-                raise RuntimeError(
-                    (
-                        "redex-all crashed with exit code {}! You can re-run it "
-                        + "under gdb by running {} or under lldb by running {}"
-                    ).format(returncode, gdb_script_name, lldb_script_name)
+                msg = exception_formatter.format_message(
+                    err_out, default_error_msg, gdb_script_name, lldb_script_name
                 )
+                raise RuntimeError(msg)
             return True
         except OSError as err:
             if err.errno == errno.ETXTBSY:
@@ -515,7 +529,7 @@ def zipalign(unaligned_apk_path, output_apk_path, ignore_zipalign, page_align):
     # Align zip and optionally perform good compression.
     try:
         zipalign = [
-            find_android_build_tool("zipalign"),
+            find_android_build_tool("zipalign.exe" if IS_WINDOWS else "zipalign"),
             "4",
             unaligned_apk_path,
             output_apk_path,
@@ -844,6 +858,33 @@ class State(object):
         self.zip_manager = zip_manager
 
 
+def _check_android_sdk_api(args):
+    arg_template = "android_sdk_api_{level}_file="
+    arg_re = re.compile("^" + arg_template.format(level="(\\d+)"))
+    for arg in args.passthru:
+        if arg_re.match(arg):
+            return
+
+    # Nothing found, check whether we have files embedded
+    logging.warning("No android_sdk_api_XX_file parameters found!")
+    try:
+        import generated_apilevels as ga
+
+        levels = ga.get_api_levels()
+        logging.info("Found embedded API levels: %s", levels)
+        api_dir = make_temp_dir("api_levels")
+        logging.info("Writing API level files to %s", api_dir)
+        for level in levels:
+            blob = ga.get_api_level_file(level)
+            filename = os.path.join(api_dir, f"framework_classes_api_{level}.txt")
+            with open(filename, "wb") as f:
+                f.write(blob)
+            arg = arg_template.format(level=level) + filename
+            args.passthru.append(arg)
+    except ImportError:
+        logging.warning("No embedded files, please add manually!")
+
+
 def prepare_redex(args):
     debug_mode = args.unpack_only or args.debug
 
@@ -981,6 +1022,9 @@ def prepare_redex(args):
         )
         config_dict[key] = json.loads(value)
 
+    # Scan for framework files. If not found, warn and add them if available.
+    _check_android_sdk_api(args)
+
     log("Running redex-all on {} dex files ".format(len(dexen)))
     if args.lldb:
         debugger = "lldb"
@@ -1036,6 +1080,26 @@ def finalize_redex(state):
     copy_all_file_to_out_dir(
         meta_file_dir, state.args.out, "*", "all redex generated artifacts"
     )
+
+    redex_stats_filename = state.config_dict.get("stats_output", "redex-stats.txt")
+    redex_stats_file = join(dirname(meta_file_dir), redex_stats_filename)
+    if isfile(redex_stats_file):
+        with open(redex_stats_file, "r") as fr:
+            apk_input_size = getsize(state.args.input_apk)
+            apk_output_size = getsize(state.args.out)
+            redex_stats_json = json.load(fr)
+            redex_stats_json["input_stats"]["total_stats"][
+                "num_compressed_apk_bytes"
+            ] = apk_input_size
+            redex_stats_json["output_stats"]["total_stats"][
+                "num_compressed_apk_bytes"
+            ] = apk_output_size
+            update_redex_stats_file = join(
+                dirname(state.args.out), redex_stats_filename
+            )
+            with open(update_redex_stats_file, "w") as fw:
+                json.dump(redex_stats_json, fw)
+
     # Write invocation file
     with open(join(dirname(state.args.out), "redex.py-invocation.txt"), "w") as f:
         print("%s" % " ".join(map(shlex.quote, sys.argv)), file=f)
@@ -1045,9 +1109,11 @@ def finalize_redex(state):
     )
 
 
-def run_redex(args, term_handler=None):
+def run_redex(args, term_handler=None, exception_formatter=None):
     state = prepare_redex(args)
-    run_redex_binary(state, term_handler)
+    if exception_formatter is None:
+        exception_formatter = ExceptionMessageFormatter()
+    run_redex_binary(state, term_handler, exception_formatter)
 
     if args.stop_pass:
         # Do not remove temp dirs

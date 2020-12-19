@@ -20,6 +20,7 @@ void InlinerConfig::bind_config() {
   bind("run_cse", run_cse, run_cse);
   bind("run_dedup_blocks", run_dedup_blocks, run_dedup_blocks);
   bind("run_copy_prop", run_copy_prop, run_copy_prop);
+  bind("run_reg_alloc", run_reg_alloc, run_reg_alloc);
   bind("run_local_dce", run_local_dce, run_local_dce);
   bind("no_inline_annos", {}, m_no_inline_annos);
   bind("force_inline_annos", {}, m_force_inline_annos);
@@ -84,6 +85,7 @@ void GlobalConfig::bind_config() {
   bind("default_coldstart_classes", "", string_param);
   bind("emit_class_method_info_map", false, bool_param);
   bind("emit_locator_strings", {}, bool_param);
+  bind("enable_ab_experiments", false, bool_param);
   bind("force_single_dex", false, bool_param);
   bind("instruction_size_bitwidth_limit", 0u, uint32_param);
   bind("json_serde_supercls", {}, string_vector_param);
@@ -126,9 +128,4 @@ GlobalConfigRegistry& GlobalConfig::default_registry() {
       register_as<OptDecisionsConfig>("opt_decisions"),
   };
   return registry;
-}
-
-GlobalConfig& GlobalConfig::get() {
-  static GlobalConfig gc(default_registry());
-  return gc;
 }

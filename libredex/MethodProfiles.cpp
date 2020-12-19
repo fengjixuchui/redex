@@ -342,17 +342,17 @@ bool MethodProfiles::parse_header(std::string& line) {
 }
 
 dexmethods_profiled_comparator::dexmethods_profiled_comparator(
+    const std::vector<DexMethod*>& initial_order,
     const method_profiles::MethodProfiles* method_profiles,
     const std::unordered_set<std::string>* allowlisted_substrings,
-    std::unordered_map<DexMethod*, double>* cache,
     bool legacy_order)
     : m_method_profiles(method_profiles),
       m_allowlisted_substrings(allowlisted_substrings),
-      m_cache(cache),
       m_legacy_order(legacy_order) {
   always_assert(m_method_profiles != nullptr);
   always_assert(m_allowlisted_substrings != nullptr);
-  always_assert(m_cache != nullptr);
+
+  m_cache.reserve(initial_order.size());
 
   m_coldstart_start_marker = static_cast<DexMethod*>(
       DexMethod::get_method("Lcom/facebook/common/methodpreloader/primarydeps/"
@@ -401,6 +401,10 @@ dexmethods_profiled_comparator::dexmethods_profiled_comparator(
               // fall back to alphabetical
               return a < b;
             });
+
+  for (auto method : initial_order) {
+    m_initial_order.emplace(method, m_initial_order.size());
+  }
 }
 
 double dexmethods_profiled_comparator::get_method_sort_num(
@@ -460,8 +464,8 @@ bool dexmethods_profiled_comparator::operator()(DexMethod* a, DexMethod* b) {
   }
 
   auto get_sort_num = [this](DexMethod* m) -> double {
-    const auto& search = m_cache->find(m);
-    if (search != m_cache->end()) {
+    const auto& search = m_cache.find(m);
+    if (search != m_cache.end()) {
       return search->second;
     }
 
@@ -472,16 +476,16 @@ bool dexmethods_profiled_comparator::operator()(DexMethod* a, DexMethod* b) {
       w = get_method_sort_num_override(m);
     }
 
-    m_cache->emplace(m, w);
+    m_cache.emplace(m, w);
     return w;
   };
 
   double sort_num_a = get_sort_num(a);
   double sort_num_b = get_sort_num(b);
 
-  if (sort_num_a == sort_num_b) {
-    return compare_dexmethods(a, b);
+  if (sort_num_a != sort_num_b) {
+    return sort_num_a < sort_num_b;
   }
 
-  return sort_num_a < sort_num_b;
+  return m_initial_order.at(a) < m_initial_order.at(b);
 }

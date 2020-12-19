@@ -240,7 +240,8 @@ std::vector<std::unique_ptr<DexDebugInstruction>> generate_debug_instructions(
     DexDebugItem* debugitem,
     PositionMapper* pos_mapper,
     uint32_t* line_start,
-    std::vector<DebugLineItem>* line_info) {
+    std::vector<DebugLineItem>* line_info,
+    uint32_t line_addin) {
   std::vector<std::unique_ptr<DexDebugInstruction>> dbgops;
   uint32_t prev_addr = 0;
   boost::optional<uint32_t> prev_line;
@@ -272,8 +273,9 @@ std::vector<std::unique_ptr<DexDebugInstruction>> generate_debug_instructions(
     }
     // only emit the last position entry for a given address
     if (!positions.empty()) {
-      auto line = pos_mapper->position_to_line(positions.back());
-      line_info->emplace_back(DebugLineItem(it->addr, line));
+      auto line_base = pos_mapper->position_to_line(positions.back());
+      auto line = line_base | line_addin;
+      line_info->emplace_back(DebugLineItem(it->addr, line_base));
       int32_t line_delta;
       if (prev_line) {
         line_delta = line - *prev_line;
@@ -1172,17 +1174,32 @@ void DexClass::gather_types(std::vector<DexType*>& ltype) const {
     m->gather_types(ltype);
   }
   for (auto const& f : m_sfields) {
-    f->gather_types_shallow(ltype);
     f->gather_types(ltype);
   }
   for (auto const& f : m_ifields) {
-    f->gather_types_shallow(ltype);
     f->gather_types(ltype);
   }
+
   ltype.push_back(m_super_class);
   ltype.push_back(m_self);
   if (m_interfaces) m_interfaces->gather_types(ltype);
   if (m_anno) m_anno->gather_types(ltype);
+
+  // We also need to gather types needed for field and method refs.
+  std::vector<DexFieldRef*> lfield;
+  gather_fields(lfield);
+  for (auto const& f : lfield) {
+    f->gather_types_shallow(ltype);
+  }
+
+  std::vector<DexMethodRef*> lmethod;
+  gather_methods(lmethod);
+  for (auto const& m : lmethod) {
+    m->gather_types_shallow(ltype);
+  }
+
+  // Remove duplicates.
+  sort_unique(ltype);
 }
 
 void DexClass::gather_load_types(std::unordered_set<DexType*>& ltype) const {

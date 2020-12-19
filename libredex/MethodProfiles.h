@@ -164,17 +164,20 @@ class MethodProfiles {
   bool parse_header(std::string& line);
 };
 
+// NOTE: Do not use this comparator directly in `std::sort` calls, as it is
+// stateful. libstdc++ copies the comparator during sorting. Instead, use
+// `std::ref` of a local instance.
 class dexmethods_profiled_comparator {
   const MethodProfiles* m_method_profiles;
   const std::unordered_set<std::string>* m_allowlisted_substrings;
-  // This cache should be a pointer so that copied
-  // comparators can still share the same cache for better performance
-  std::unordered_map<DexMethod*, double>* m_cache;
+  std::unordered_map<DexMethod*, double> m_cache;
   bool m_legacy_order;
   std::vector<std::string> m_interactions;
 
   const DexMethod* m_coldstart_start_marker;
   const DexMethod* m_coldstart_end_marker;
+
+  std::unordered_map<DexMethod*, size_t> m_initial_order;
 
   // The profiled method order is broken into sections, one section for each
   // interaction. Each section has a range of floating point numbers assigned to
@@ -193,10 +196,14 @@ class dexmethods_profiled_comparator {
 
  public:
   dexmethods_profiled_comparator(
+      const std::vector<DexMethod*>& initial_order,
       const method_profiles::MethodProfiles* method_profiles,
       const std::unordered_set<std::string>* allowlisted_substrings,
-      std::unordered_map<DexMethod*, double>* cache,
       bool legacy_order);
+
+  // See class comment.
+  dexmethods_profiled_comparator(const dexmethods_profiled_comparator&) =
+      delete;
 
   bool operator()(DexMethod* a, DexMethod* b);
 };

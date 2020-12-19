@@ -8,17 +8,12 @@
 #include "TypeAnalysisTransform.h"
 
 #include "DexInstruction.h"
+#include "KotlinNullCheckMethods.h"
 #include "Show.h"
 
+using namespace kotlin_nullcheck_wrapper;
+
 namespace {
-
-constexpr const char* CHECK_PARAM_NULL_SIGNATURE =
-    "Lkotlin/jvm/internal/Intrinsics;.checkParameterIsNotNull:(Ljava/lang/"
-    "Object;Ljava/lang/String;)V";
-constexpr const char* CHECK_EXPR_NULL_SIGNATURE =
-    "Lkotlin/jvm/internal/Intrinsics;.checkExpressionValueIsNotNull:(Ljava/"
-    "lang/Object;Ljava/lang/String;)V";
-
 enum BranchResult {
   ALWAYS_TAKEN,
   NEVER_TAKEN,
@@ -184,11 +179,12 @@ Transform::Stats Transform::apply(
       remove_redundant_null_checks(env, block, stats);
     }
   }
-  apply_changes(code);
+  apply_changes(method);
   return stats;
 }
 
-void Transform::apply_changes(IRCode* code) {
+void Transform::apply_changes(DexMethod* method) {
+  auto* code = method->get_code();
   for (auto const& p : m_replacements) {
     IRInstruction* old_op = p.first;
     if (opcode::is_branch(old_op->opcode())) {

@@ -9,7 +9,14 @@
 
 #include <iomanip>
 
+#include <boost/version.hpp>
+// Quoted was accepted into public components as of 1.73. The `detail`
+// header was removed in 1.74.
+#if BOOST_VERSION < 107400
 #include <boost/io/detail/quoted_manip.hpp>
+#else
+#include <boost/io/quoted.hpp>
+#endif
 
 #include "ControlFlow.h"
 #include "Creators.h"
@@ -1151,6 +1158,10 @@ std::ostream& operator<<(std::ostream& o, const MethodItemEntry& mie) {
     break;
   case MFLOW_POSITION:
     o << "POSITION: " << *mie.pos;
+    break;
+  case MFLOW_SOURCE_BLOCK:
+    o << "SOURCE-BLOCK: " << show(mie.src_block->src) << "@"
+      << mie.src_block->id;
     break;
   case MFLOW_FALLTHROUGH:
     o << "FALLTHROUGH";

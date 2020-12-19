@@ -65,6 +65,12 @@ struct BlockAccessor;
 } // namespace impl
 } // namespace inliner
 
+namespace source_blocks {
+namespace impl {
+struct BlockAccessor;
+} // namespace impl
+} // namespace source_blocks
+
 namespace cfg {
 
 enum EdgeType : uint8_t {
@@ -318,6 +324,8 @@ class Block final {
   // including move-result-pseudo
   bool starts_with_move_result();
 
+  bool starts_with_move_exception();
+
   bool contains_opcode(IROpcode opcode);
 
   // returns true iff the block starts with the same MethodItemEntries as the
@@ -388,6 +396,7 @@ class Block final {
   friend class InstructionIteratorImpl<false>;
   friend class InstructionIteratorImpl<true>;
   friend struct ::inliner::impl::BlockAccessor;
+  friend struct ::source_blocks::impl::BlockAccessor;
 
   // return an iterator to the conditional branch (including switch) in this
   // block. If there is no such instruction, return end()
@@ -810,6 +819,8 @@ class ControlFlowGraph {
   // Search all the instructions in this CFG for the given one. Return an
   // iterator to it, or end, if it isn't in the graph.
   InstructionIterator find_insn(IRInstruction* insn, Block* hint = nullptr);
+  ConstInstructionIterator find_insn(IRInstruction* insn,
+                                     Block* hint = nullptr) const;
 
   // choose an order of blocks for output
   std::vector<Block*> order();
@@ -1173,6 +1184,9 @@ class InstructionIteratorImpl {
     }
   }
 
+  InstructionIteratorImpl(const InstructionIteratorImpl<false>& rhs)
+      : m_cfg(rhs.m_cfg), m_block(rhs.m_block), m_it(rhs.m_it) {}
+
   InstructionIteratorImpl<is_const>& operator++() {
     assert_not_end();
     ++m_it;
@@ -1250,6 +1264,9 @@ class InstructionIteratorImpl {
   }
 
   Cfg& cfg() const { return *m_cfg; }
+
+  template <bool kConst>
+  friend class InstructionIteratorImpl;
 };
 
 // Iterate through all IRInstructions in the CFG.

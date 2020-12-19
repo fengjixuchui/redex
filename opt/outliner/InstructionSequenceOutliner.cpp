@@ -74,10 +74,13 @@
 
 #include <boost/format.hpp>
 
+#include "ABExperimentContext.h"
 #include "BigBlocks.h"
 #include "CFGMutation.h"
+#include "ConcurrentContainers.h"
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "Debug.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "DexLimits.h"
@@ -88,6 +91,7 @@
 #include "InterDexPass.h"
 #include "Lazy.h"
 #include "Liveness.h"
+#include "Macros.h"
 #include "MethodProfiles.h"
 #include "MutablePriorityQueue.h"
 #include "OutlinerTypeAnalysis.h"
@@ -100,6 +104,8 @@
 #include "StlUtil.h"
 #include "Trace.h"
 #include "Walkers.h"
+
+using namespace instruction_sequence_outliner;
 
 namespace {
 
@@ -657,6 +663,11 @@ static bool can_outline_insn(const RefChecker& ref_checker,
     if (!ref_checker.check_method(method)) {
       return false;
     }
+    auto rabbit_type =
+        DexType::make_type("Lcom/facebook/redex/RabbitRuntimeHelper;");
+    if (method->get_class() == rabbit_type) {
+      return false;
+    }
   } else if (insn->has_field()) {
     auto field = resolve_field(insn->get_field());
     if (field == nullptr || field != insn->get_field()) {
@@ -768,7 +779,7 @@ using ExploredCallback =
 // Result indicates whether the big block was successfully explored to the end.
 static bool explore_candidates_from(
     LazyReachingInitializedsEnvironments& reaching_initializeds,
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     const RefChecker& ref_checker,
     const CandidateInstructionCoresSet& recurring_cores,
     PartialCandidate* pc,
@@ -892,7 +903,7 @@ struct FindCandidatesStats {
 // For each candidate, gather information about where exactly in the
 // given method it is located.
 static MethodCandidates find_method_candidates(
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     const RefChecker& ref_checker,
     bool skip_loops,
     DexMethod* method,
@@ -1141,6 +1152,18 @@ static MethodCandidates find_method_candidates(
 // get_recurring_cores
 ////////////////////////////////////////////////////////////////////////////////
 
+static bool method_has_try_blocks(DexMethod* method) {
+  auto code = method->get_code();
+  if (code->editable_cfg_built()) {
+    auto ii = cfg::InstructionIterable(code->cfg());
+    return std::any_of(ii.begin(), ii.end(),
+                       [](auto& mie) { return mie.type == MFLOW_TRY; });
+  } else {
+    return std::any_of(code->begin(), code->end(),
+                       [](auto& mie) { return mie.type == MFLOW_TRY; });
+  }
+}
+
 static bool can_outline_from_method(
     DexMethod* method,
     const std::unordered_set<DexMethod*>& sufficiently_hot_methods) {
@@ -1150,6 +1173,10 @@ static bool can_outline_from_method(
   if (sufficiently_hot_methods.count(method)) {
     return false;
   }
+  if (method_has_try_blocks(method)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -1361,7 +1388,7 @@ static DexMethod* find_reusable_method(
 }
 
 static size_t get_savings(
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     const Candidate& c,
     const CandidateInfo& ci,
     const ReusableOutlinedMethods* reusable_outlined_methods) {
@@ -1401,7 +1428,7 @@ struct CandidateWithInfo {
 // deterministic (as opposed to a pointer) and provide an efficient
 // identification mechanism.
 static void get_beneficial_candidates(
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     PassManager& mgr,
     const Scope& scope,
     const std::unordered_set<DexMethod*>& sufficiently_warm_methods,
@@ -1624,7 +1651,8 @@ class OutlinedMethodCreator {
           cfg::Block* last_block{nullptr};
           for (auto& csi : cn.insns) {
             auto next_dbg_pos{last_dbg_pos};
-            for (; it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG;
+            for (; it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG ||
+                   it->type == MFLOW_SOURCE_BLOCK;
                  it++) {
               if (it->type == MFLOW_POSITION) {
                 next_dbg_pos = it->pos.get();
@@ -1993,7 +2021,7 @@ class DexState {
 // outlined methods
 class HostClassSelector {
  private:
-  const InstructionSequenceOutlinerConfig& m_config;
+  const Config& m_config;
   PassManager& m_mgr;
   DexState& m_dex_state;
   DexClass* m_outlined_cls{nullptr};
@@ -2009,7 +2037,7 @@ class HostClassSelector {
   HostClassSelector() = delete;
   HostClassSelector(const HostClassSelector&) = delete;
   HostClassSelector& operator=(const HostClassSelector&) = delete;
-  HostClassSelector(const InstructionSequenceOutlinerConfig& config,
+  HostClassSelector(const Config& config,
                     PassManager& mgr,
                     DexState& dex_state,
                     int min_sdk,
@@ -2179,13 +2207,16 @@ using NewlyOutlinedMethods =
     std::unordered_map<DexMethod*, std::vector<DexMethod*>>;
 
 // Outlining all occurrences of a particular candidate.
-bool outline_candidate(const Candidate& c,
-                       const CandidateInfo& ci,
-                       ReusableOutlinedMethods* reusable_outlined_methods,
-                       NewlyOutlinedMethods* newly_outlined_methods,
-                       DexState* dex_state,
-                       HostClassSelector* host_class_selector,
-                       OutlinedMethodCreator* outlined_method_creator) {
+bool outline_candidate(
+    const Candidate& c,
+    const CandidateInfo& ci,
+    ReusableOutlinedMethods* reusable_outlined_methods,
+    NewlyOutlinedMethods* newly_outlined_methods,
+    DexState* dex_state,
+    HostClassSelector* host_class_selector,
+    OutlinedMethodCreator* outlined_method_creator,
+    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
+        experiments_contexts) {
   // Before attempting to create or reuse an outlined method that hasn't been
   // referenced in this dex before, we'll make sure that all the involved
   // type refs can be added to the dex. We collect those type refs.
@@ -2242,6 +2273,11 @@ bool outline_candidate(const Candidate& c,
   for (auto& p : ci.methods) {
     auto method = p.first;
     auto& cfg = method->get_code()->cfg();
+    if (experiments_contexts->count(method) == 0) {
+      auto exp =
+          ab_test::ABExperimentContext::create(&cfg, method, "outliner_v1");
+      experiments_contexts->insert({method, std::move(exp)});
+    }
     TRACE(ISO, 7, "[invoke sequence outliner] before outlined %s from %s\n%s",
           SHOW(outlined_method), SHOW(method), SHOW(cfg));
     for (auto& cml : p.second) {
@@ -2256,7 +2292,7 @@ bool outline_candidate(const Candidate& c,
 // Perform outlining of most beneficial candidates, while staying within
 // reference limits.
 static NewlyOutlinedMethods outline(
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     PassManager& mgr,
     DexState& dex_state,
     int min_sdk,
@@ -2264,7 +2300,9 @@ static NewlyOutlinedMethods outline(
     std::unordered_map<DexMethod*, std::unordered_set<CandidateId>>*
         candidate_ids_by_methods,
     ReusableOutlinedMethods* reusable_outlined_methods,
-    size_t iteration) {
+    size_t iteration,
+    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
+        experiments_contexts) {
   MethodNameGenerator method_name_generator(mgr, iteration);
   OutlinedMethodCreator outlined_method_creator(mgr, method_name_generator);
   HostClassSelector host_class_selector(config, mgr, dex_state, min_sdk,
@@ -2327,7 +2365,8 @@ static NewlyOutlinedMethods outline(
           2 * savings);
     if (outline_candidate(cwi.candidate, cwi.info, reusable_outlined_methods,
                           &newly_outlined_methods, &dex_state,
-                          &host_class_selector, &outlined_method_creator)) {
+                          &host_class_selector, &outlined_method_creator,
+                          experiments_contexts)) {
       dex_state.insert_method_ref();
     } else {
       TRACE(ISO, 3, "[invoke sequence outliner] could not ouline");
@@ -2402,8 +2441,7 @@ size_t count_affected_methods(
 ////////////////////////////////////////////////////////////////////////////////
 
 std::unordered_map<const DexMethodRef*, double> get_methods_global_order(
-    ConfigFiles& config_files,
-    const InstructionSequenceOutlinerConfig& config) {
+    ConfigFiles& config_files, const Config& config) {
   if (!config.reorder_with_method_profiles) {
     return {};
   }
@@ -2458,7 +2496,7 @@ std::unordered_map<const DexMethodRef*, double> get_methods_global_order(
 }
 
 void reorder_with_method_profiles(
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     PassManager& mgr,
     const Scope& dex,
     const std::unordered_map<const DexMethodRef*, double>& methods_global_order,
@@ -2567,16 +2605,29 @@ void reorder_with_method_profiles(
 
 static size_t clear_cfgs(
     const Scope& scope,
-    const std::unordered_set<DexMethod*>& sufficiently_hot_methods) {
+    const std::unordered_set<DexMethod*>& sufficiently_hot_methods,
+    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
+        experiments_contexts) {
   std::atomic<size_t> methods{0};
-  walk::parallel::code(scope, [&sufficiently_hot_methods,
-                               &methods](DexMethod* method, IRCode& code) {
-    if (!can_outline_from_method(method, sufficiently_hot_methods)) {
-      return;
-    }
-    code.clear_cfg();
-    methods++;
-  });
+  walk::parallel::code(
+      scope, [&sufficiently_hot_methods, &methods,
+              experiments_contexts](DexMethod* method, IRCode& code) {
+        if (!can_outline_from_method(method, sufficiently_hot_methods)) {
+          return;
+        }
+
+        auto exp = experiments_contexts->get(method, nullptr);
+        if (exp) {
+          exp->flush();
+          experiments_contexts->erase(method);
+        } else {
+          code.clear_cfg();
+        }
+
+        methods++;
+      });
+
+  always_assert(experiments_contexts->size() == 0);
   return (size_t)methods;
 }
 
@@ -2605,7 +2656,7 @@ static size_t clear_cfgs(
 static void gather_sufficiently_warm_and_hot_methods(
     const Scope& scope,
     ConfigFiles& config_files,
-    const InstructionSequenceOutlinerConfig& config,
+    const Config& config,
     std::unordered_set<DexMethod*>* sufficiently_warm_methods,
     std::unordered_set<DexMethod*>* sufficiently_hot_methods) {
   bool has_method_profiles{false};
@@ -2636,13 +2687,55 @@ static void gather_sufficiently_warm_and_hot_methods(
     }
   }
 
-  if (config.use_perf_sensitive_if_no_method_profiles && !has_method_profiles) {
+  switch (config.perf_sensitivity) {
+  case PerfSensitivity::kNeverUse:
+    break;
+
+  case PerfSensitivity::kWarmWhenNoProfiles:
+    if (has_method_profiles) {
+      break;
+    }
+    FALLTHROUGH_INTENDED;
+  case PerfSensitivity::kAlwaysWarm:
     walk::methods(scope, [sufficiently_warm_methods](DexMethod* method) {
       if (type_class(method->get_class())->is_perf_sensitive()) {
         sufficiently_warm_methods->insert(method);
       }
     });
+    break;
+
+  case PerfSensitivity::kHotWhenNoProfiles:
+    if (has_method_profiles) {
+      break;
+    }
+    FALLTHROUGH_INTENDED;
+  case PerfSensitivity::kAlwaysHot:
+    walk::methods(scope, [sufficiently_hot_methods](DexMethod* method) {
+      if (type_class(method->get_class())->is_perf_sensitive()) {
+        sufficiently_hot_methods->insert(method);
+      }
+    });
+    break;
   }
+}
+
+PerfSensitivity parse_perf_sensitivity(const std::string& str) {
+  if (str == "never") {
+    return PerfSensitivity::kNeverUse;
+  }
+  if (str == "warm-when-no-profiles") {
+    return PerfSensitivity::kWarmWhenNoProfiles;
+  }
+  if (str == "always-warm") {
+    return PerfSensitivity::kAlwaysWarm;
+  }
+  if (str == "hot-when-no-profiles") {
+    return PerfSensitivity::kHotWhenNoProfiles;
+  }
+  if (str == "always-hot") {
+    return PerfSensitivity::kAlwaysHot;
+  }
+  always_assert_log(false, "Unknown perf sensitivity: %s", str.c_str());
 }
 
 } // namespace
@@ -2668,11 +2761,8 @@ void InstructionSequenceOutliner::bind_config() {
        m_config.method_profiles_warm_call_count,
        m_config.method_profiles_warm_call_count,
        "Loops are not outlined from warm methods");
-  bind("use_perf_sensitive_if_no_method_profiles",
-       m_config.use_perf_sensitive_if_no_method_profiles,
-       m_config.use_perf_sensitive_if_no_method_profiles,
-       "Whether to use provided cold-start configuration data to "
-       "determine if certain code should not be outlined from a method");
+  std::string perf_sensitivity_str;
+  bind("perf_sensitivity", "always-hot", perf_sensitivity_str);
   bind("reuse_outlined_methods_across_dexes",
        m_config.reuse_outlined_methods_across_dexes,
        m_config.reuse_outlined_methods_across_dexes,
@@ -2687,9 +2777,13 @@ void InstructionSequenceOutliner::bind_config() {
        m_config.savings_threshold,
        "Minimum number of code units saved before a particular code sequence "
        "is outlined anywhere");
-  always_assert(m_config.min_insns_size >= MIN_INSNS_SIZE);
-  always_assert(m_config.max_insns_size >= m_config.min_insns_size);
-  always_assert(m_config.max_outlined_methods_per_class > 0);
+  after_configuration([=]() {
+    always_assert(m_config.min_insns_size >= MIN_INSNS_SIZE);
+    always_assert(m_config.max_insns_size >= m_config.min_insns_size);
+    always_assert(m_config.max_outlined_methods_per_class > 0);
+    always_assert(!perf_sensitivity_str.empty());
+    m_config.perf_sensitivity = parse_perf_sensitivity(perf_sensitivity_str);
+  });
 }
 
 void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
@@ -2775,16 +2869,19 @@ void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
       // TODO: Merge candidates that are equivalent except that one returns
       // something and the other doesn't. Affects around 1.5% of candidates.
       DexState dex_state(mgr, dex, dex_id++, reserved_trefs, reserved_mrefs);
+      ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>
+          experiments_contexts;
       auto newly_outlined_methods =
           outline(m_config, mgr, dex_state, min_sdk, &candidates_with_infos,
                   &candidate_ids_by_methods, reusable_outlined_methods.get(),
-                  iteration);
+                  iteration, &experiments_contexts);
 
       reorder_with_method_profiles(m_config, mgr, dex, methods_global_order,
                                    newly_outlined_methods);
       auto affected_methods = count_affected_methods(newly_outlined_methods);
 
-      auto total_methods = clear_cfgs(dex, sufficiently_hot_methods);
+      auto total_methods =
+          clear_cfgs(dex, sufficiently_hot_methods, &experiments_contexts);
       if (total_methods > 0) {
         mgr.incr_metric(std::string("percent_methods_affected_in_Dex") +
                             std::to_string(dex_id),

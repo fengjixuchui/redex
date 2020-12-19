@@ -33,6 +33,7 @@
 #include <json/json.h>
 
 #include "ABExperimentContext.h"
+#include "CommandProfiling.h"
 #include "CommentFilter.h"
 #include "ControlFlow.h" // To set DEBUG.
 #include "Debug.h"
@@ -359,7 +360,8 @@ Arguments parse_args(int argc, char* argv[]) {
   if (vm.count("reflect-config")) {
     Json::Value reflected_config;
 
-    reflected_config["global"] = reflect_config(GlobalConfig::get().reflect());
+    GlobalConfig gc(GlobalConfig::default_registry());
+    reflected_config["global"] = reflect_config(gc.reflect());
 
     Json::Value pass_configs = Json::arrayValue;
     const auto& passes = PassRegistry::get().get_passes();
@@ -911,13 +913,13 @@ void redex_frontend(ConfigFiles& conf, /* input */
 /**
  * Post processing steps: write dex and collect stats
  */
-void redex_backend(const std::string& output_dir,
-                   ConfigFiles& conf,
+void redex_backend(ConfigFiles& conf,
                    PassManager& manager,
                    DexStoresVector& stores,
                    Json::Value& stats) {
   Timer redex_backend_timer("Redex_backend");
   const RedexOptions& redex_options = manager.get_redex_options();
+  const auto& output_dir = conf.get_outdir();
 
   instruction_lowering::Stats instruction_lowering_stats;
   {
@@ -938,6 +940,9 @@ void redex_backend(const std::string& output_dir,
     locator_index = new LocatorIndex(make_locator_index(stores));
   }
 
+  auto disable_method_similarity_order =
+      json_config.get("disable_method_similarity_order", false);
+
   dex_stats_t output_totals;
   std::vector<dex_stats_t> output_dexes_stats;
 
@@ -953,7 +958,7 @@ void redex_backend(const std::string& output_dir,
                                                   : line_number_map_filename));
   std::unordered_map<DexMethod*, uint64_t> method_to_id;
   std::unordered_map<DexCode*, std::vector<DebugLineItem>> code_debug_lines;
-  IODIMetadata iodi_metadata;
+  IODIMetadata iodi_metadata(redex_options.min_sdk);
 
   std::unique_ptr<PostLowering> post_lowering =
       redex_options.redacted ? PostLowering::create() : nullptr;
@@ -984,7 +989,8 @@ void redex_backend(const std::string& output_dir,
                                is_iodi(dik) ? &iodi_metadata : nullptr,
                                stores[0].get_dex_magic(),
                                post_lowering.get(),
-                               manager.get_redex_options().min_sdk);
+                               manager.get_redex_options().min_sdk,
+                               disable_method_similarity_order);
 
       output_totals += this_dex_stats;
       output_dexes_stats.push_back(this_dex_stats);
@@ -1092,6 +1098,25 @@ void dump_class_method_info_map(const std::string& file_path,
   });
 }
 
+boost::optional<ScopedCommandProfiling> maybe_command_profile() {
+  if (getenv("GLOBAL_PROFILE_COMMAND") == nullptr) {
+    return boost::none;
+  }
+
+  boost::optional<std::string> shutdown_cmd = boost::none;
+  if (getenv("GLOBAL_PROFILE_SHUTDOWN_COMMAND") != nullptr) {
+    shutdown_cmd = std::string(getenv("GLOBAL_PROFILE_SHUTDOWN_COMMAND"));
+  }
+  boost::optional<std::string> post_cmd = boost::none;
+  if (getenv("GLOBAL_PROFILE_POST_COMMAND")) {
+    post_cmd = std::string(getenv("GLOBAL_PROFILE_POST_COMMAND"));
+  }
+
+  return ScopedCommandProfiling{
+      boost::make_optional(std::string(getenv("GLOBAL_PROFILE_COMMAND"))),
+      shutdown_cmd, post_cmd};
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -1106,6 +1131,8 @@ int main(int argc, char* argv[]) {
   block_multi_asserts(/*block=*/true);
   // For better stacks in abort dumps.
   set_abort_if_not_this_thread();
+
+  auto maybe_global_profile = maybe_command_profile();
 
   std::string stats_output_path;
   Json::Value stats;
@@ -1150,7 +1177,7 @@ int main(int argc, char* argv[]) {
     }
 
     redex_frontend(conf, args, *pg_config, stores, stats);
-    GlobalConfig::get().parse_config(conf.get_json_config());
+    conf.parse_global_config();
 
     // Initialize purity defaults, if set.
     purity::CacheConfig::parse_default(conf);
@@ -1159,7 +1186,10 @@ int main(int argc, char* argv[]) {
     PassManager manager(passes, std::move(pg_config), args.config,
                         args.redex_options);
 
-    if (manager.get_redex_options().is_art_build) {
+    if (conf.get_json_config().get("force_ab_exp_test_mode", false)) {
+      ab_test::ABExperimentContext::force_test_mode();
+    } else if (manager.get_redex_options().is_art_build ||
+               !args.config.get("enable_ab_experiments", false).asBool()) {
       ab_test::ABExperimentContext::force_preferred_mode();
     }
 
@@ -1170,7 +1200,7 @@ int main(int argc, char* argv[]) {
 
     if (args.stop_pass_idx == boost::none) {
       // Call redex_backend by default
-      redex_backend(args.out_dir, conf, manager, stores, stats);
+      redex_backend(conf, manager, stores, stats);
       if (args.config.get("emit_class_method_info_map", false).asBool()) {
         dump_class_method_info_map(conf.metafile(CLASS_METHOD_INFO_MAP),
                                    stores);

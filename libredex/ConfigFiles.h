@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "GlobalConfig.h"
 #include "JsonWrapper.h"
 #include "ProguardMap.h"
 
@@ -98,6 +99,9 @@ struct ConfigFiles {
 
   std::string get_outdir() const { return outdir; }
 
+  // For development only!
+  void set_outdir(const std::string& new_outdir) { outdir = new_outdir; }
+
   const ProguardMap& get_proguard_map() const;
 
   const std::string& get_printseeds() const { return m_printseeds; }
@@ -107,6 +111,7 @@ struct ConfigFiles {
   }
 
   const JsonWrapper& get_json_config() const { return m_json; }
+  const GlobalConfig& get_global_config() const { return m_global_config; }
 
   /**
    * Get the global inliner config from the "inliner" section. If there is not
@@ -128,6 +133,8 @@ struct ConfigFiles {
 
   const api::AndroidSDK& get_android_sdk_api(int32_t min_sdk_api);
 
+  void parse_global_config();
+
   /**
    * Load configurations with the initial scope.
    */
@@ -136,6 +143,7 @@ struct ConfigFiles {
  private:
   JsonWrapper m_json;
   std::string outdir;
+  GlobalConfig m_global_config;
 
   std::vector<std::string> load_coldstart_classes();
   std::unordered_map<std::string, std::vector<std::string>> load_class_lists();

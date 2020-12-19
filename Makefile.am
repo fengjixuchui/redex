@@ -66,7 +66,6 @@ libredex_la_SOURCES = \
 	libredex/GraphVisualizer.cpp \
 	libredex/HierarchyUtil.cpp \
 	libredex/InitCollisionFinder.cpp \
-	libredex/InlineForSpeed.cpp \
 	libredex/InlinerConfig.cpp \
 	libredex/InstructionLowering.cpp \
 	libredex/IODIMetadata.cpp \
@@ -83,9 +82,12 @@ libredex_la_SOURCES = \
 	libredex/JsonWrapper.cpp \
 	libredex/KeepReason.cpp \
 	libredex/Match.cpp \
+	libredex/MatchFlow.cpp \
+	libredex/MatchFlowDetail.cpp \
 	libredex/MethodDevirtualizer.cpp \
 	libredex/MethodOverrideGraph.cpp \
 	libredex/MethodProfiles.cpp \
+	libredex/MethodSimilarityOrderer.cpp \
 	libredex/MethodUtil.cpp \
 	libredex/MonitorCount.cpp \
 	libredex/Mutators.cpp \
@@ -147,7 +149,9 @@ libredex_la_SOURCES = \
 	service/class-merging/ApproximateShapeMerging.cpp \
 	service/class-merging/ClassAssemblingUtils.cpp \
 	service/class-merging/ClassMerging.cpp \
+	service/class-merging/AnonymousModelGenerator.cpp \
 	service/class-merging/MergerType.cpp \
+	service/class-merging/MergingStrategies.cpp \
 	service/class-merging/ModelMerger.cpp \
 	service/class-merging/ModelMethodMerger.cpp \
 	service/class-merging/Model.cpp \
@@ -188,6 +192,12 @@ libredex_la_SOURCES = \
 	service/method-merger/MethodMerger.cpp \
 	service/reference-update/MethodReference.cpp \
 	service/reference-update/TypeReference.cpp \
+	service/regalloc/GraphColoring.cpp \
+	service/regalloc/Interference.cpp \
+	service/regalloc/RegisterAllocation.cpp \
+	service/regalloc/RegisterType.cpp \
+	service/regalloc/Split.cpp \
+	service/regalloc/VirtualRegistersFile.cpp \
 	service/switch-dispatch/SwitchDispatch.cpp \
 	service/switch-partitioning/SwitchEquivFinder.cpp \
 	service/switch-partitioning/SwitchMethodPartitioning.cpp \
@@ -234,6 +244,7 @@ libopt_la_SOURCES = \
 	opt/bridge/Bridge.cpp \
 	opt/check_breadcrumbs/CheckBreadcrumbs.cpp \
 	opt/check-recursion/CheckRecursion.cpp \
+	opt/class-merging/AnonymousClassMergingPass.cpp \
 	opt/class-merging/ClassMergingPass.cpp \
 	opt/class-splitting/ClassSplitting.cpp \
 	opt/constant-propagation/ConstantPropagationPass.cpp \
@@ -248,6 +259,8 @@ libopt_la_SOURCES = \
 	opt/evaluate_type_checks/EvaluateTypeChecks.cpp \
 	opt/final_inline/FinalInline.cpp \
 	opt/final_inline/FinalInlineV2.cpp \
+	opt/insert-source-blocks/InsertSourceBlocks.cpp \
+	opt/instrument/BlockInstrument.cpp \
 	opt/instrument/Instrument.cpp \
 	opt/interdex/CrossDexRefMinimizer.cpp \
 	opt/interdex/CrossDexRelocator.cpp \
@@ -277,12 +290,7 @@ libopt_la_SOURCES = \
 	opt/peephole/RedundantCheckCastRemover.cpp \
 	opt/print-members/PrintMembers.cpp \
 	opt/rebindrefs/ReBindRefs.cpp \
-	opt/regalloc/GraphColoring.cpp \
-	opt/regalloc/Interference.cpp \
 	opt/regalloc/RegAlloc.cpp \
-	opt/regalloc/RegisterType.cpp \
-	opt/regalloc/Split.cpp \
-	opt/regalloc/VirtualRegistersFile.cpp \
 	opt/remove-apilevel-checks/RemoveApiLevelChecks.cpp \
 	opt/remove-builders/RemoveBuilders.cpp \
 	opt/remove-builders/RemoveBuildersHelper.cpp \
@@ -398,11 +406,18 @@ redexdump_LDADD = \
 bin_SCRIPTS = redex apkutil
 CLEANFILES = redex
 
+# Embedded API level files.
+GEN_API_LEVELS_SCRIPT = gen_packed_apilevels.py
+GENERATED_API_LEVELS_MODULE = generated_apilevels.py
+$(GENERATED_API_LEVELS_MODULE): $(GEN_API_LEVELS_SCRIPT) service/api-levels/framework_classes_api_*.txt
+	python3 $(GEN_API_LEVELS_SCRIPT) -o $@ service/api-levels/framework_classes_api_*.txt
+
 PYTHON_SRCS := redex.py \
 	pyredex/__init__.py \
 	pyredex/logger.py \
 	pyredex/unpacker.py \
-	pyredex/utils.py
+	pyredex/utils.py \
+	$(GENERATED_API_LEVELS_MODULE)
 
 redex: redex-all $(PYTHON_SRCS)
 	$(srcdir)/bundle-redex.sh

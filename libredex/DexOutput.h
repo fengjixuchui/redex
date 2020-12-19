@@ -43,6 +43,7 @@ enum class SortMode {
   CLASS_STRINGS,
   CLINIT_FIRST,
   METHOD_PROFILED_ORDER,
+  METHOD_SIMILARITY,
   DEFAULT
 };
 
@@ -140,7 +141,8 @@ dex_stats_t write_classes_to_dex(
     IODIMetadata* iodi_metadata,
     const std::string& dex_magic,
     PostLowering const* post_lowering = nullptr,
-    int min_sdk = 0);
+    int min_sdk = 0,
+    bool disable_method_similarity_order = false);
 
 using cmp_dstring = bool (*)(const DexString*, const DexString*);
 using cmp_dtype = bool (*)(const DexType*, const DexType*);
@@ -258,6 +260,7 @@ class GatheredTypes {
 
   void gather_class(int num);
 
+  void sort_dexmethod_emitlist_method_ref_order(std::vector<DexMethod*>& lmeth);
   void sort_dexmethod_emitlist_default_order(std::vector<DexMethod*>& lmeth);
   void sort_dexmethod_emitlist_cls_order(std::vector<DexMethod*>& lmeth);
   void sort_dexmethod_emitlist_clinit_order(std::vector<DexMethod*>& lmeth);
@@ -296,6 +299,14 @@ struct DexOutputTestHelper;
 class DexOutput {
  public:
   dex_stats_t m_stats;
+
+  static constexpr size_t kIODILayerBits = 4;
+  static constexpr size_t kIODILayerBound = 1 << (kIODILayerBits - 1);
+  static constexpr size_t kIODILayerShift =
+      sizeof(uint32_t) * 8 - kIODILayerBits;
+  static constexpr uint32_t kIODIDataMask = (1 << kIODILayerShift) - 1;
+  static constexpr uint32_t kIODILayerMask = ((1 << kIODILayerBits) - 1)
+                                             << kIODILayerShift;
 
  private:
   DexClasses* m_classes;

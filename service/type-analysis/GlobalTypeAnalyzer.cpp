@@ -43,10 +43,16 @@ void trace_whole_program_state_diff(const WholeProgramState& old_wps,
   }
 }
 
-void scan_any_init_reachables(const call_graph::Graph& cg,
-                              const DexMethod* method,
-                              ConcurrentSet<const DexMethod*>& reachables) {
-  if (!method || method::is_any_init(method) || reachables.count(method)) {
+void scan_any_init_reachables(
+    const call_graph::Graph& cg,
+    const method_override_graph::Graph& method_override_graph,
+    const DexMethod* method,
+    bool trace_callbacks,
+    ConcurrentSet<const DexMethod*>& reachables) {
+  if (!method || method::is_clinit(method) || reachables.count(method)) {
+    return;
+  }
+  if (!trace_callbacks && method::is_init(method)) {
     return;
   }
   auto code = method->get_code();
@@ -75,7 +81,30 @@ void scan_any_init_reachables(const call_graph::Graph& cg,
     }
     auto callees = resolve_callees_in_graph(cg, method, insn);
     for (const DexMethod* callee : callees) {
-      scan_any_init_reachables(cg, callee, reachables);
+      scan_any_init_reachables(
+          cg, method_override_graph, callee, false, reachables);
+    }
+  }
+  if (!trace_callbacks) {
+    return;
+  }
+  const auto owning_cls = type_class(method->get_class());
+  if (!owning_cls) {
+    return;
+  }
+  // If trace_callbacks, include external overrides (potential call backs)
+  for (const auto* vmethod : owning_cls->get_vmethods()) {
+    bool overrides_external = false;
+    const auto& overridens =
+        mog::get_overridden_methods(method_override_graph, vmethod);
+    for (auto overriden : overridens) {
+      if (overriden->is_external()) {
+        overrides_external = true;
+      }
+    }
+    if (overrides_external) {
+      scan_any_init_reachables(
+          cg, method_override_graph, vmethod, false, reachables);
     }
   }
 }
@@ -211,6 +240,82 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
   return local_ta;
 }
 
+bool args_have_type(const DexProto* proto, const DexType* type) {
+  always_assert(type);
+  for (const auto arg_type : proto->get_args()->get_type_list()) {
+    if (arg_type == type) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Check if a class extends an Android SDK class. It is relevant to the init
+ * reachable analysis since the external super type can call an overriding
+ * method on a subclass from its own ctor.
+ */
+bool extends_android_sdk(const DexClass* cls) {
+  if (!cls) {
+    return false;
+  }
+  auto* super_type = cls->get_super_class();
+  auto* super_cls = type_class(cls->get_super_class());
+  while (super_cls && super_type != type::java_lang_Object()) {
+    if (boost::starts_with(show(super_type), "Landroid/")) {
+      return true;
+    }
+    super_type = super_cls->get_super_class();
+    super_cls = type_class(super_type);
+  }
+  return false;
+}
+
+/*
+ * Determine if a type is likely an anonymous class by looking at the type
+ * hierarchy instead of checking its name. The reason is that the type name can
+ * be obfuscated before running the analysis, so it's not always reliable.
+ *
+ * An anonymous can either extend an abstract type or extend j/l/Object; and
+ * implement one interface.
+ */
+bool is_likely_anonymous_class(const DexType* type) {
+  const auto* cls = type_class(type);
+  if (!cls) {
+    return false;
+  }
+  const auto* super_type = cls->get_super_class();
+  if (super_type == type::java_lang_Object()) {
+    auto intfs = cls->get_interfaces()->get_type_list();
+    return intfs.size() == 1;
+  }
+  const auto* super_cls = type_class(super_type);
+  if (super_cls && is_abstract(super_cls)) {
+    return true;
+  }
+  return false;
+}
+
+/*
+ * Check if the object being constructed is leaking to an instance of an
+ * anonymous class, whose call back can be invoked by another thread. If that
+ * happens, the call back can transitively access fields that are not fully
+ * initialized.
+ */
+bool is_leaking_this_in_ctor(const DexMethod* caller, const DexMethod* callee) {
+  if (method::is_init(caller) && method::is_init(callee)) {
+    const auto* caller_type = caller->get_class();
+    if (!args_have_type(callee->get_proto(), caller_type)) {
+      return false;
+    }
+
+    const auto* callee_type = callee->get_class();
+    return is_likely_anonymous_class(callee_type);
+  }
+
+  return false;
+}
+
 /*
  * The nullness analysis has an issue. That is in a method reachable from a
  * clinit or ctor in the call graph, a read of a field that is not yet
@@ -226,6 +331,7 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
  */
 void GlobalTypeAnalysis::find_any_init_reachables(const Scope& scope,
                                                   const call_graph::Graph& cg) {
+  auto method_override_graph = mog::build_graph(scope);
   walk::parallel::methods(scope, [&](DexMethod* method) {
     if (!method::is_any_init(method)) {
       return;
@@ -254,7 +360,34 @@ void GlobalTypeAnalysis::find_any_init_reachables(const Scope& scope,
       }
       auto callees = resolve_callees_in_graph(cg, method, insn);
       for (const DexMethod* callee : callees) {
-        scan_any_init_reachables(cg, callee, m_any_init_reachables);
+        bool trace_callbacks_in_callee_cls =
+            is_leaking_this_in_ctor(method, callee);
+        scan_any_init_reachables(cg,
+                                 *method_override_graph,
+                                 callee,
+                                 trace_callbacks_in_callee_cls,
+                                 m_any_init_reachables);
+      }
+    }
+  });
+  // For classes extending an Android SDK type, their virtual methods overriding
+  // an external can be reachable from the ctor of the super class.
+  walk::parallel::classes(scope, [&](DexClass* cls) {
+    if (!extends_android_sdk(cls)) {
+      return;
+    }
+    for (const auto* vmethod : cls->get_vmethods()) {
+      bool overrides_external = false;
+      const auto& overridens =
+          mog::get_overridden_methods(*method_override_graph, vmethod);
+      for (auto overriden : overridens) {
+        if (overriden->is_external()) {
+          overrides_external = true;
+        }
+      }
+      if (overrides_external) {
+        scan_any_init_reachables(
+            cg, *method_override_graph, vmethod, false, m_any_init_reachables);
       }
     }
   });
@@ -268,7 +401,9 @@ std::unique_ptr<GlobalTypeAnalyzer> GlobalTypeAnalysis::analyze(
   // within FixpointIterator::analyze_node(), since that can get called
   // multiple times for a given method
   walk::parallel::code(scope, [](DexMethod*, IRCode& code) {
-    code.build_cfg(/* editable */ false);
+    if (!code.cfg_built()) {
+      code.build_cfg(/* editable */ false);
+    }
     code.cfg().calculate_exit_block();
   });
   find_any_init_reachables(scope, cg);
