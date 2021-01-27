@@ -95,7 +95,8 @@ MultiMethodInliner::MultiMethodInliner(
     const std::unordered_map<const DexMethod*, size_t>*
         same_method_implementations,
     bool analyze_and_prune_inits,
-    const std::unordered_set<DexMethodRef*>& configured_pure_methods)
+    const std::unordered_set<DexMethodRef*>& configured_pure_methods,
+    const std::unordered_set<DexString*>& configured_finalish_field_names)
     : resolver(std::move(resolve_fn)),
       xstores(stores),
       m_scope(scope),
@@ -104,6 +105,7 @@ MultiMethodInliner::MultiMethodInliner(
       m_inline_for_speed(inline_for_speed),
       m_same_method_implementations(same_method_implementations),
       m_pure_methods(get_pure_methods()),
+      m_finalish_field_names(configured_finalish_field_names),
       m_analyze_and_prune_inits(analyze_and_prune_inits) {
   for (const auto& callee_callers : true_virtual_callers) {
     for (const auto& caller_insns : callee_callers.second) {
@@ -121,25 +123,25 @@ MultiMethodInliner::MultiMethodInliner(
     std::unordered_set<DexMethod*> candidate_callees(candidates.begin(),
                                                      candidates.end());
     XDexRefs x_dex(stores);
-    walk::opcodes(scope, [](DexMethod* caller) { return true; },
-                  [&](DexMethod* caller, IRInstruction* insn) {
-                    if (opcode::is_an_invoke(insn->opcode())) {
-                      auto callee =
-                          resolver(insn->get_method(), opcode_to_search(insn));
-                      if (callee != nullptr && callee->is_concrete() &&
-                          candidate_callees.count(callee) &&
-                          true_virtual_callers.count(callee) == 0) {
-                        if (x_dex.cross_dex_ref(caller, callee)) {
-                          candidate_callees.erase(callee);
-                          if (callee_caller.count(callee)) {
-                            callee_caller.erase(callee);
-                          }
-                        } else {
-                          callee_caller[callee].push_back(caller);
-                        }
-                      }
-                    }
-                  });
+    walk::opcodes(
+        scope, [](DexMethod* caller) { return true; },
+        [&](DexMethod* caller, IRInstruction* insn) {
+          if (opcode::is_an_invoke(insn->opcode())) {
+            auto callee = resolver(insn->get_method(), opcode_to_search(insn));
+            if (callee != nullptr && callee->is_concrete() &&
+                candidate_callees.count(callee) &&
+                true_virtual_callers.count(callee) == 0) {
+              if (x_dex.cross_dex_ref(caller, callee)) {
+                candidate_callees.erase(callee);
+                if (callee_caller.count(callee)) {
+                  callee_caller.erase(callee);
+                }
+              } else {
+                callee_caller[callee].push_back(caller);
+              }
+            }
+          }
+        });
     for (const auto& callee_callers : true_virtual_callers) {
       auto callee = callee_callers.first;
       for (const auto& caller_insns : callee_callers.second) {
@@ -191,8 +193,8 @@ MultiMethodInliner::MultiMethodInliner(
     auto immutable_getters = get_immutable_getters(scope);
     m_pure_methods.insert(immutable_getters.begin(), immutable_getters.end());
     if (m_config.run_cse) {
-      m_cse_shared_state =
-          std::make_unique<cse_impl::SharedState>(m_pure_methods);
+      m_cse_shared_state = std::make_unique<cse_impl::SharedState>(
+          m_pure_methods, m_finalish_field_names);
     }
     if (m_config.run_local_dce) {
       std::unique_ptr<const method_override_graph::Graph> owned_override_graph;
@@ -782,6 +784,7 @@ void MultiMethodInliner::inline_inlinables(
   }
 
   if (exp != nullptr) {
+    caller->cfg().simplify(); // Remove unreachable code.
     exp->flush();
     if (caller_had_editable_cfg) {
       caller->build_cfg();
@@ -903,7 +906,9 @@ void MultiMethodInliner::shrink_method(DexMethod* method) {
     // too.
     auto before_features = get_features();
 
-    regalloc::graph_coloring::allocate({}, method);
+    auto config = regalloc::graph_coloring::Allocator::Config{};
+    config.no_overwrite_this = true; // Downstream passes may rely on this.
+    regalloc::graph_coloring::allocate(config, method);
     // After this, any CFG is gone.
 
     // Assume that dedup will run, so building CFG is OK.
@@ -1525,7 +1530,11 @@ bool MultiMethodInliner::can_inline_init(const DexMethod* init_method) {
     return *opt_can_inline_init;
   }
 
-  bool res = constructor_analysis::can_inline_init(init_method);
+  const std::unordered_set<const DexField*>* finalizable_fields =
+      m_cse_shared_state ? &m_cse_shared_state->get_finalizable_fields()
+                         : nullptr;
+  bool res =
+      constructor_analysis::can_inline_init(init_method, finalizable_fields);
   m_can_inline_init.update(
       init_method,
       [&](const DexMethod*, boost::optional<bool>& value, bool exists) {
@@ -2083,16 +2092,17 @@ void MultiMethodInliner::delayed_invoke_direct_to_static() {
     TRACE(MMINL, 6, "making %s static", method->get_name()->c_str());
     mutators::make_static(method);
   }
-  walk::parallel::opcodes(m_scope, [](DexMethod* meth) { return true; },
-                          [&](DexMethod*, IRInstruction* insn) {
-                            auto op = insn->opcode();
-                            if (op == OPCODE_INVOKE_DIRECT) {
-                              auto m = insn->get_method()->as_def();
-                              if (m && m_delayed_make_static.count_unsafe(m)) {
-                                insn->set_opcode(OPCODE_INVOKE_STATIC);
-                              }
-                            }
-                          });
+  walk::parallel::opcodes(
+      m_scope, [](DexMethod* meth) { return true; },
+      [&](DexMethod*, IRInstruction* insn) {
+        auto op = insn->opcode();
+        if (op == OPCODE_INVOKE_DIRECT) {
+          auto m = insn->get_method()->as_def();
+          if (m && m_delayed_make_static.count_unsafe(m)) {
+            insn->set_opcode(OPCODE_INVOKE_STATIC);
+          }
+        }
+      });
 }
 
 namespace {

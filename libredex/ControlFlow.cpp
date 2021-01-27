@@ -1443,12 +1443,12 @@ void ControlFlowGraph::deep_copy(ControlFlowGraph* new_cfg) const {
   }
 }
 
-InstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
+InstructionIterator ControlFlowGraph::find_insn(IRInstruction* insn,
                                                 Block* hint) {
   if (hint != nullptr) {
     auto ii = ir_list::InstructionIterable(hint);
     for (auto it = ii.begin(); it != ii.end(); ++it) {
-      if (it->insn == needle) {
+      if (it->insn == insn) {
         return hint->to_cfg_instruction_iterator(it);
       }
     }
@@ -1456,19 +1456,19 @@ InstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
 
   auto iterable = InstructionIterable(*this);
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
-    if (it->insn == needle) {
+    if (it->insn == insn) {
       return it;
     }
   }
   return iterable.end();
 }
 
-ConstInstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
+ConstInstructionIterator ControlFlowGraph::find_insn(IRInstruction* insn,
                                                      Block* hint) const {
   if (hint != nullptr) {
     auto ii = ir_list::InstructionIterable(hint);
     for (auto it = ii.begin(); it != ii.end(); ++it) {
-      if (it->insn == needle) {
+      if (it->insn == insn) {
         return hint->to_cfg_instruction_iterator(it);
       }
     }
@@ -1476,7 +1476,7 @@ ConstInstructionIterator ControlFlowGraph::find_insn(IRInstruction* needle,
 
   auto iterable = ConstInstructionIterable(*this);
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
-    if (it->insn == needle) {
+    if (it->insn == insn) {
       return it;
     }
   }
@@ -2022,7 +2022,8 @@ void ControlFlowGraph::delete_pred_edges(Block* b) {
 ControlFlowGraph::EdgeSet ControlFlowGraph::remove_edges_between(Block* p,
                                                                  Block* s,
                                                                  bool cleanup) {
-  return remove_edge_if(p, s, [](const Edge*) { return true; }, cleanup);
+  return remove_edge_if(
+      p, s, [](const Edge*) { return true; }, cleanup);
 }
 
 void ControlFlowGraph::delete_edges_between(Block* p, Block* s) {
@@ -2030,8 +2031,9 @@ void ControlFlowGraph::delete_edges_between(Block* p, Block* s) {
 }
 
 void ControlFlowGraph::remove_edge(Edge* edge, bool cleanup) {
-  remove_edge_if(edge->src(), edge->target(),
-                 [edge](const Edge* e) { return edge == e; }, cleanup);
+  remove_edge_if(
+      edge->src(), edge->target(), [edge](const Edge* e) { return edge == e; },
+      cleanup);
 }
 
 void ControlFlowGraph::free_all_blocks_and_edges() {
@@ -2476,17 +2478,18 @@ std::ostream& ControlFlowGraph::write_dot_format(std::ostream& o) const {
 
 ControlFlowGraph::EdgeSet ControlFlowGraph::remove_succ_edges(Block* b,
                                                               bool cleanup) {
-  return remove_succ_edge_if(b, [](const Edge*) { return true; }, cleanup);
+  return remove_succ_edge_if(
+      b, [](const Edge*) { return true; }, cleanup);
 }
 
 ControlFlowGraph::EdgeSet ControlFlowGraph::remove_pred_edges(Block* b,
                                                               bool cleanup) {
-  return remove_pred_edge_if(b, [](const Edge*) { return true; }, cleanup);
+  return remove_pred_edge_if(
+      b, [](const Edge*) { return true; }, cleanup);
 }
 
-DexPosition* ControlFlowGraph::get_dbg_pos(
-    const cfg::InstructionIterator& callsite) {
-  always_assert(&callsite.cfg() == this);
+DexPosition* ControlFlowGraph::get_dbg_pos(const cfg::InstructionIterator& it) {
+  always_assert(&it.cfg() == this);
   auto search_block = [](Block* b,
                          IRList::iterator in_block_it) -> DexPosition* {
     // Search for an MFLOW_POSITION preceding this instruction within the
@@ -2497,7 +2500,7 @@ DexPosition* ControlFlowGraph::get_dbg_pos(
     return in_block_it->type == MFLOW_POSITION ? in_block_it->pos.get()
                                                : nullptr;
   };
-  auto result = search_block(callsite.block(), callsite.unwrap());
+  auto result = search_block(it.block(), it.unwrap());
   if (result != nullptr) {
     return result;
   }
@@ -2534,7 +2537,7 @@ DexPosition* ControlFlowGraph::get_dbg_pos(
     // This block has no solo predecessors anymore. Nowhere left to search.
     return nullptr;
   };
-  return check_prev_block(callsite.block());
+  return check_prev_block(it.block());
 }
 
 } // namespace cfg

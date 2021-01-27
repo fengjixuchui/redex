@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "ConcurrentContainers.h"
+#include "Debug.h"
 #include "DexMemberRefs.h"
 #include "FrequentlyUsedPointersCache.h"
 #include "KeepReason.h"
@@ -41,7 +42,7 @@ struct DexPosition;
 struct RedexContext;
 namespace keep_rules {
 struct AssumeReturnValue;
-}
+} // namespace keep_rules
 
 extern RedexContext* g_redex;
 
@@ -151,9 +152,20 @@ struct RedexContext {
   // Add a lambda to be called when RedexContext is destructed. This is
   // especially useful for resetting caches/singletons in tests.
   using Task = std::function<void(void)>;
-  void add_destruction_task(const Task& t) { m_destruction_tasks.push_back(t); }
+  void add_destruction_task(const Task& t);
 
-  FrequentlyUsedPointers pointers_cache() { return m_pointers_cache; }
+  static constexpr bool kDebugPointersCacheLoad = false;
+  void load_pointers_cache() {
+    m_pointers_cache.load();
+    m_pointers_cache_loaded = true;
+  }
+  const FrequentlyUsedPointers& pointers_cache() {
+    if (!m_pointers_cache_loaded) {
+      redex_assert(!kDebugPointersCacheLoad);
+      load_pointers_cache();
+    }
+    return m_pointers_cache;
+  }
 
   // Set and return field values keep_rules::AssumeReturnValue provided by
   // proguard rules.
@@ -291,11 +303,13 @@ struct RedexContext {
       s_keep_reasons;
 
   // These functions will be called when ~RedexContext() is called
+  std::mutex m_destruction_tasks_lock;
   std::vector<Task> m_destruction_tasks;
 
   bool m_record_keep_reasons{false};
   bool m_allow_class_duplicates;
 
+  bool m_pointers_cache_loaded{false};
   FrequentlyUsedPointers m_pointers_cache;
 
   // Field values map specified by Proguard assume value

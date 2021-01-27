@@ -459,8 +459,8 @@ keep_rules::AssumeReturnValue* RedexContext::get_field_value(DexField* field) {
   return nullptr;
 }
 
-void RedexContext::unset_field_value(DexField* method) {
-  field_values.erase(method);
+void RedexContext::unset_field_value(DexField* field) {
+  field_values.erase(field);
 }
 
 void RedexContext::set_return_value(DexMethod* method,
@@ -480,4 +480,9 @@ keep_rules::AssumeReturnValue* RedexContext::get_return_value(
 
 void RedexContext::unset_return_value(DexMethod* method) {
   method_return_values.erase(method);
+}
+
+void RedexContext::add_destruction_task(const Task& t) {
+  std::unique_lock<std::mutex> lock{m_destruction_tasks_lock};
+  m_destruction_tasks.push_back(t);
 }

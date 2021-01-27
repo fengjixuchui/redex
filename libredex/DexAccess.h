@@ -36,7 +36,7 @@
 // clang-format on
 
 enum DexAccessFlags : uint32_t {
-#define AF(uc, lc, val) ACC_##uc = val,
+#define AF(uc, lc, val) ACC_##uc = (val),
   ACCESSFLAGS
 #undef AF
 };
@@ -112,7 +112,7 @@ void loosen_access_modifier_except_vmethods(DexClass* clazz);
  * Loosen access modifier of classes and @InnerClass annotations without needing
  * change opcodes.
  */
-void loosen_access_modifier(const DexClasses& clazz);
+void loosen_access_modifier(const DexClasses& classes);
 
 template <class DexMember>
 void set_public(DexMember* m) {

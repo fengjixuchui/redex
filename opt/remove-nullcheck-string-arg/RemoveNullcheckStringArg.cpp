@@ -24,6 +24,7 @@ void RemoveNullcheckStringArg::run_pass(DexStoresVector& stores,
                                         ConfigFiles& /*conf*/,
                                         PassManager& mgr) {
   TransferMap transfer_map;
+
   std::unordered_set<DexMethod*> new_methods;
   if (!setup(transfer_map, new_methods)) {
     TRACE(NULLCHECK, 2, "RemoveNullcheckStringArgPass: setup failed");
@@ -49,39 +50,61 @@ void RemoveNullcheckStringArg::run_pass(DexStoresVector& stores,
 
 bool RemoveNullcheckStringArg::setup(
     TransferMap& transfer_map, std::unordered_set<DexMethod*>& new_methods) {
-  auto new_check_param_method = get_wrapper_method_with_int_index(
-      CHECK_PARAM_NULL_SIGNATURE, WRAPPER_CHECK_PARAM_NULL_METHOD,
-      NEW_CHECK_PARAM_NULL_SIGNATURE);
-  auto new_check_expr_method = get_wrapper_method(
-      CHECK_EXPR_NULL_SIGNATURE, WRAPPER_CHECK_EXPR_NULL_METHOD,
-      NEW_CHECK_EXPR_NULL_SIGNATURE);
 
+  bool is_param_check_V1_4 = false;
+  DexMethodRef* builtin_param =
+      DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE_V1_3);
+  if (!builtin_param) {
+    is_param_check_V1_4 = true;
+    builtin_param = DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE_V1_4);
+  }
+  /* If we didn't find the method, giveup. */
+  if (!builtin_param) {
+    return false;
+  }
+
+  bool is_expr_check_V1_4 = false;
+  DexMethodRef* builtin_expr =
+      DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE_V1_3);
+  if (!builtin_expr) {
+    is_expr_check_V1_4 = true;
+    builtin_expr = DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE_V1_4);
+  }
+  if (!builtin_expr) {
+    return false;
+  }
+
+  if (is_expr_check_V1_4 != is_param_check_V1_4) {
+    /* We have V1_3 and v1_4 mthods. */
+    TRACE(NULLCHECK, 1, "We have Kotlin 1.3 and 1.4 NULLCHECK assertions");
+    return false;
+  }
+
+  auto new_check_param_method = get_wrapper_method_with_int_index(
+      NEW_CHECK_PARAM_NULL_SIGNATURE, WRAPPER_CHECK_PARAM_NULL_METHOD,
+      builtin_param);
+  auto new_check_expr_method =
+      get_wrapper_method(NEW_CHECK_EXPR_NULL_SIGNATURE,
+                         WRAPPER_CHECK_EXPR_NULL_METHOD, builtin_expr);
   /* If we could not generate suitable wrapper method, giveup. */
   if (!new_check_param_method || !new_check_expr_method) {
     return false;
   }
-  transfer_map[DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE)] =
-      std::make_pair(new_check_param_method, true);
-  transfer_map[DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE)] =
-      std::make_pair(new_check_expr_method, false);
-  new_methods.insert(new_check_param_method);
+  transfer_map[builtin_param] = std::make_pair(new_check_param_method, true);
+  transfer_map[builtin_expr] = std::make_pair(new_check_expr_method, false);
+
   new_methods.insert(new_check_expr_method);
+  new_methods.insert(new_check_param_method);
   return true;
 }
 
 DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
-    const char* builtin_signature,
+    const char* wrapper_signature,
     const char* wrapper_name,
-    const char* wrapper_signature) {
+    DexMethodRef* builtin) {
 
   if (DexMethod::get_method(wrapper_signature)) {
     /* Wrapper method already exist. */
-    return nullptr;
-  }
-
-  DexMethodRef* builtin = DexMethod::get_method(builtin_signature);
-  /* If we didn't find the method, giveup. */
-  if (!builtin) {
     return nullptr;
   }
 
@@ -89,6 +112,7 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
   if (!host_cls) {
     return nullptr;
   }
+
   DexTypeList* arg_signature =
       DexTypeList::make_type_list({type::java_lang_Object()});
   const auto proto = DexProto::make_proto(type::_void(), arg_signature);
@@ -98,13 +122,18 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
                                ACC_PUBLIC | ACC_STATIC);
   auto obj_arg = method_creator.get_local(0);
 
-  std::vector<Location> args;
-  args.push_back(obj_arg);
   auto main_block = method_creator.get_main_block();
-  auto str_var = method_creator.make_local(type::java_lang_String());
-  main_block->load_const(str_var, DexString::make_string(""));
-  args.push_back(str_var);
-  main_block->invoke(OPCODE_INVOKE_STATIC, builtin, args);
+  auto str_type = DexType::get_type("Ljava/lang/String;");
+  if (!str_type) {
+    return nullptr;
+  }
+
+  auto str_const = method_creator.make_local(str_type);
+
+  // const-string v2, "UNKNOWN"
+  main_block->load_const(str_const, DexString::make_string("UNKNOWN"));
+
+  main_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_const});
   main_block->ret_void();
 
   auto new_method = method_creator.create();
@@ -114,18 +143,12 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
 }
 
 DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
-    const char* builtin_signature,
+    const char* wrapper_signature,
     const char* wrapper_name,
-    const char* wrapper_signature) {
+    DexMethodRef* builtin) {
 
   if (DexMethod::get_method(wrapper_signature)) {
     /* Wrapper method already exist. */
-    return nullptr;
-  }
-
-  DexMethodRef* builtin = DexMethod::get_method(builtin_signature);
-  /* If we didn't find the method, giveup. */
-  if (!builtin) {
     return nullptr;
   }
 
@@ -133,6 +156,7 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
   if (!host_cls) {
     return nullptr;
   }
+
   DexTypeList* arg_signature =
       DexTypeList::make_type_list({type::java_lang_Object(), type::_int()});
   const auto proto = DexProto::make_proto(type::_void(), arg_signature);
@@ -142,13 +166,10 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
                                ACC_PUBLIC | ACC_STATIC);
   auto obj_arg = method_creator.get_local(0);
 
-  std::vector<Location> args;
-  args.push_back(obj_arg);
   // If the wrapper is going to print the index of the param as a string, we
   // will have to construct a string from the index with additional
   // information as part of the wrapper method.
   auto main_block = method_creator.get_main_block();
-  auto if_block = main_block->if_testz(OPCODE_IF_EQZ, obj_arg);
   auto int_ind = method_creator.get_local(1);
   auto str_type = DexType::get_type("Ljava/lang/String;");
   auto str_builder_type = DexType::get_type("Ljava/lang/StringBuilder;");
@@ -160,14 +181,13 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
       "Ljava/lang/Integer;.toString:(I)Ljava/lang/String;");
   auto str_builder_init_method =
       DexMethod::get_method("Ljava/lang/StringBuilder;.<init>:()V");
-  auto appenda_method = DexMethod::get_method(
+  auto append_method = DexMethod::get_method(
       "Ljava/lang/StringBuilder;.append:(Ljava/lang/"
       "String;)Ljava/lang/StringBuilder;");
-  auto str_builder_to_str_mehod = DexMethod::get_method(
+  auto str_builder_to_str_method = DexMethod::get_method(
       "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;");
 
-  if (!to_str_method || !str_builder_to_str_mehod || !appenda_method ||
-      !str_builder_to_str_mehod) {
+  if (!to_str_method || !append_method || !str_builder_to_str_method) {
     return nullptr;
   }
   auto str_ind = method_creator.make_local(str_type);
@@ -176,33 +196,33 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
   auto str_res = method_creator.make_local(str_type);
 
   // invoke-static {v3}, Ljava/lang/Integer;.toString:(I)Ljava/lang/String;
-  if_block->invoke(OPCODE_INVOKE_STATIC, to_str_method, {int_ind});
+  main_block->invoke(OPCODE_INVOKE_STATIC, to_str_method, {int_ind});
   // move-result-object v3
-  if_block->move_result(str_ind, str_type);
+  main_block->move_result(str_ind, str_type);
   // new-instance v1, Ljava/lang/StringBuilder;
-  if_block->new_instance(str_builder_type, str_builder);
+  main_block->new_instance(str_builder_type, str_builder);
   // invoke-direct {v1}, Ljava/lang/StringBuilder;.<init>:()V
-  if_block->invoke(OPCODE_INVOKE_DIRECT, str_builder_init_method,
-                   {str_builder});
+  main_block->invoke(OPCODE_INVOKE_DIRECT, str_builder_init_method,
+                     {str_builder});
   // const-string v2, "param index = "
-  if_block->load_const(str_const, DexString::make_string("param at index = "));
+  main_block->load_const(str_const,
+                         DexString::make_string("param at index = "));
   // invoke-virtual {v1, v2},
   // Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
-  if_block->invoke(OPCODE_INVOKE_VIRTUAL, appenda_method,
-                   {str_builder, str_const});
+  main_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
+                     {str_builder, str_const});
   // invoke-virtual {v1, v3},
   // Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
-  if_block->invoke(OPCODE_INVOKE_VIRTUAL, appenda_method,
-                   {str_builder, str_ind});
+  main_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
+                     {str_builder, str_ind});
   // invoke-virtual {v1},
   // Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;
-  if_block->invoke(OPCODE_INVOKE_VIRTUAL, str_builder_to_str_mehod,
-                   {str_builder});
+  main_block->invoke(OPCODE_INVOKE_VIRTUAL, str_builder_to_str_method,
+                     {str_builder});
   // move-result-object v3
-  if_block->move_result(str_res, str_type);
+  main_block->move_result(str_res, str_type);
 
-  if_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_res});
-  if_block->ret_void();
+  main_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_res});
   main_block->ret_void();
 
   auto new_method = method_creator.create();

@@ -606,10 +606,10 @@ void Model::shape_model() {
   TRACE(CLMG, 4, "Excluded types total %ld", m_excluded.size());
 }
 
-void Model::shape_merger(const MergerType& merger,
+void Model::shape_merger(const MergerType& root,
                          MergerType::ShapeCollector& shapes) {
   // if the root has got no children there is nothing to "shape"
-  const auto& children = m_hierarchy.find(merger.type);
+  const auto& children = m_hierarchy.find(root.type);
   if (children == m_hierarchy.end()) {
     return;
   }
@@ -809,12 +809,20 @@ std::vector<TypeSet> Model::group_per_interdex_set(const TypeSet& types) {
   for (const auto& pair : type_to_usages) {
     auto index = get_interdex_group(pair.second, s_cls_to_interdex_group,
                                     s_num_interdex_groups);
+    if (m_spec.merge_per_interdex_set == InterDexGroupingType::NON_HOT_SET) {
+      if (index == 0) {
+        // Drop mergeables that are in the hot set.
+        continue;
+      }
+    } else if (m_spec.merge_per_interdex_set ==
+               InterDexGroupingType::NON_ORDERED_SET) {
+      if (index < s_num_interdex_groups - 1) {
+        // Only merge the last group which are not in ordered set, drop other
+        // mergeables.
+        continue;
+      }
+    }
     new_groups[index].emplace(pair.first);
-  }
-
-  if (m_spec.merge_per_interdex_set == InterDexGroupingType::NON_HOT_SET) {
-    // Drop mergeables that are in the hot set.
-    new_groups[0].clear();
   }
 
   return new_groups;

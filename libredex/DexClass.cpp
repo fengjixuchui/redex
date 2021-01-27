@@ -94,14 +94,14 @@ DexDebugEntry::DexDebugEntry(uint32_t addr,
 DexDebugEntry::DexDebugEntry(uint32_t addr, std::unique_ptr<DexPosition> pos)
     : type(DexDebugEntryType::Position), addr(addr), pos(std::move(pos)) {}
 
-DexDebugEntry::DexDebugEntry(DexDebugEntry&& that) noexcept
-    : type(that.type), addr(that.addr) {
+DexDebugEntry::DexDebugEntry(DexDebugEntry&& other) noexcept
+    : type(other.type), addr(other.addr) {
   switch (type) {
   case DexDebugEntryType::Position:
-    new (&pos) std::unique_ptr<DexPosition>(std::move(that.pos));
+    new (&pos) std::unique_ptr<DexPosition>(std::move(other.pos));
     break;
   case DexDebugEntryType::Instruction:
-    new (&insn) std::unique_ptr<DexDebugInstruction>(std::move(that.insn));
+    new (&insn) std::unique_ptr<DexDebugInstruction>(std::move(other.insn));
     break;
   }
 }
@@ -1493,12 +1493,13 @@ DexProto* DexType::get_non_overlapping_proto(DexString* method_name,
     new_arg_list.push_back(t);
   }
   new_arg_list.push_back(type::_int());
-  DexTypeList* new_args = DexTypeList::make_type_list(std::move(new_arg_list));
+  DexTypeList* new_args =
+      DexTypeList::make_type_list(std::deque<DexType*>{new_arg_list});
   DexProto* new_proto = DexProto::make_proto(rtype, new_args);
   methodref_in_context = DexMethod::get_method(this, method_name, new_proto);
   while (methodref_in_context) {
     new_arg_list.push_back(type::_int());
-    new_args = DexTypeList::make_type_list(std::move(new_arg_list));
+    new_args = DexTypeList::make_type_list(std::deque<DexType*>{new_arg_list});
     new_proto = DexProto::make_proto(rtype, new_args);
     methodref_in_context = DexMethod::get_method(this, method_name, new_proto);
   }

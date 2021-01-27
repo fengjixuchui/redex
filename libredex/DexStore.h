@@ -316,10 +316,15 @@ class XDexRefs {
   /**
    * Return true if the method is located in the primary dex.
    */
-  bool is_in_primary_dex(const DexMethod* overridden) const;
+  bool is_in_primary_dex(const DexMethod* method) const;
 
   /**
    * Number of dexes.
    */
   size_t num_dexes() const;
 };
+
+/**
+ * Squash the stores into a single dex.
+ */
+void squash_into_one_dex(DexStoresVector& stores);

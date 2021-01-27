@@ -102,7 +102,6 @@ UNUSED void dump_args(const Arguments& args) {
   std::cout << "verify_none_mode: " << args.redex_options.verify_none_enabled
             << std::endl;
   std::cout << "art_build: " << args.redex_options.is_art_build << std::endl;
-  std::cout << "enable_pgi: " << args.redex_options.enable_pgi << std::endl;
   std::cout << "enable_instrument_pass: "
             << args.redex_options.instrument_pass_enabled << std::endl;
   std::cout << "min_sdk: " << args.redex_options.min_sdk << std::endl;
@@ -279,10 +278,6 @@ Arguments parse_args(int argc, char* argv[]) {
       "is-art-build",
       po::bool_switch(&args.redex_options.is_art_build)->default_value(false),
       "If specified, states that the current build is art specific.\n");
-  od.add_options()(
-      "enable-pgi",
-      po::bool_switch(&args.redex_options.enable_pgi)->default_value(false),
-      "If not specified, Profile Guided Inlining will not be run.\n");
   od.add_options()(
       "disable-dex-hasher",
       po::bool_switch(&args.redex_options.disable_dex_hasher)
@@ -537,8 +532,6 @@ Arguments parse_args(int argc, char* argv[]) {
         args.redex_options.verify_none_enabled ? "Yes" : "No");
   TRACE(MAIN, 2, "Art build: %s",
         args.redex_options.is_art_build ? "Yes" : "No");
-  TRACE(MAIN, 2, "PGI enabled: %s",
-        args.redex_options.enable_pgi ? "Yes" : "No");
   TRACE(MAIN, 2, "Enable InstrumentPass: %s",
         args.redex_options.instrument_pass_enabled ? "Yes" : "No");
 
@@ -782,6 +775,59 @@ std::string get_dex_magic(std::vector<std::string>& dex_files) {
   return load_dex_magic_from_dex(dex_files[0].c_str());
 }
 
+void dump_keep_reasons(const ConfigFiles& conf,
+                       const Arguments& args,
+                       const DexStoresVector& stores) {
+  if (!args.config.get("dump_keep_reasons", false).asBool()) {
+    return;
+  }
+
+  std::ofstream ofs(conf.metafile("redex-keep-reasons.txt"));
+
+  auto scope = build_class_scope(stores);
+  for (const auto* cls : scope) {
+    auto has_keep_reasons = [cls]() {
+      if (!cls->rstate.keep_reasons().empty()) {
+        return true;
+      }
+      for (auto* m : cls->get_all_methods()) {
+        if (!m->rstate.keep_reasons().empty()) {
+          return true;
+        }
+      }
+      for (auto* f : cls->get_all_fields()) {
+        if (!f->rstate.keep_reasons().empty()) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!has_keep_reasons()) {
+      continue;
+    }
+    auto print_keep_reasons = [&ofs](const auto& reasons, const char* indent) {
+      for (const auto* r : reasons) {
+        ofs << indent << "* " << *r << "\n";
+      }
+    };
+    ofs << "Class: " << show_deobfuscated(cls) << "\n";
+    print_keep_reasons(cls->rstate.keep_reasons(), " ");
+
+    auto print_list = [&ofs, &print_keep_reasons](const auto& c,
+                                                  const char* name) {
+      for (const auto* member : c) {
+        if (member->rstate.keep_reasons().empty()) {
+          continue; // Skip stuff w/o reasons.
+        }
+        ofs << " " << name << ": " << show_deobfuscated(member) << "\n";
+        print_keep_reasons(member->rstate.keep_reasons(), "  ");
+      }
+    };
+    print_list(cls->get_all_fields(), "Field");
+    print_list(cls->get_all_methods(), "Method");
+  }
+}
+
 /**
  * Pre processing steps: load dex and configurations
  */
@@ -791,6 +837,9 @@ void redex_frontend(ConfigFiles& conf, /* input */
                     DexStoresVector& stores,
                     Json::Value& stats) {
   Timer redex_frontend_timer("Redex_frontend");
+
+  g_redex->load_pointers_cache();
+
   for (const auto& pg_config_path : args.proguard_config_paths) {
     Timer time_pg_parsing("Parsed ProGuard config file");
     keep_rules::proguard_parser::parse_file(pg_config_path, &pg_config);
@@ -907,6 +956,10 @@ void redex_frontend(ConfigFiles& conf, /* input */
     Timer t("Initializing reachable classes");
     // init reachable will change rstate of classes, methods and fields
     init_reachable_classes(scope, ReachableClassesConfig(json_config));
+  }
+
+  if (RedexContext::record_keep_reasons()) {
+    dump_keep_reasons(conf, args, stores);
   }
 }
 
@@ -1098,25 +1151,6 @@ void dump_class_method_info_map(const std::string& file_path,
   });
 }
 
-boost::optional<ScopedCommandProfiling> maybe_command_profile() {
-  if (getenv("GLOBAL_PROFILE_COMMAND") == nullptr) {
-    return boost::none;
-  }
-
-  boost::optional<std::string> shutdown_cmd = boost::none;
-  if (getenv("GLOBAL_PROFILE_SHUTDOWN_COMMAND") != nullptr) {
-    shutdown_cmd = std::string(getenv("GLOBAL_PROFILE_SHUTDOWN_COMMAND"));
-  }
-  boost::optional<std::string> post_cmd = boost::none;
-  if (getenv("GLOBAL_PROFILE_POST_COMMAND")) {
-    post_cmd = std::string(getenv("GLOBAL_PROFILE_POST_COMMAND"));
-  }
-
-  return ScopedCommandProfiling{
-      boost::make_optional(std::string(getenv("GLOBAL_PROFILE_COMMAND"))),
-      shutdown_cmd, post_cmd};
-}
-
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -1132,7 +1166,8 @@ int main(int argc, char* argv[]) {
   // For better stacks in abort dumps.
   set_abort_if_not_this_thread();
 
-  auto maybe_global_profile = maybe_command_profile();
+  auto maybe_global_profile =
+      ScopedCommandProfiling::maybe_from_env("GLOBAL_", "global");
 
   std::string stats_output_path;
   Json::Value stats;
@@ -1176,8 +1211,12 @@ int main(int argc, char* argv[]) {
       args.redex_options.min_sdk = *maybe_sdk;
     }
 
-    redex_frontend(conf, args, *pg_config, stores, stats);
-    conf.parse_global_config();
+    {
+      auto profile_frontend =
+          ScopedCommandProfiling::maybe_from_env("FRONTEND_", "frontend");
+      redex_frontend(conf, args, *pg_config, stores, stats);
+      conf.parse_global_config();
+    }
 
     // Initialize purity defaults, if set.
     purity::CacheConfig::parse_default(conf);
@@ -1200,6 +1239,8 @@ int main(int argc, char* argv[]) {
 
     if (args.stop_pass_idx == boost::none) {
       // Call redex_backend by default
+      auto profile_backend =
+          ScopedCommandProfiling::maybe_from_env("BACKEND_", "backend");
       redex_backend(conf, manager, stores, stats);
       if (args.config.get("emit_class_method_info_map", false).asBool()) {
         dump_class_method_info_map(conf.metafile(CLASS_METHOD_INFO_MAP),

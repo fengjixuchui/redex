@@ -141,7 +141,7 @@ class MultiMethodInliner {
       const std::vector<DexClass*>& scope,
       DexStoresVector& stores,
       const std::unordered_set<DexMethod*>& candidates,
-      std::function<DexMethod*(DexMethodRef*, MethodSearch)> resolver,
+      std::function<DexMethod*(DexMethodRef*, MethodSearch)> resolve_fn,
       const inliner::InlinerConfig& config,
       MultiMethodInlinerMode mode = InterDex,
       const CalleeCallerInsns& true_virtual_callers = {},
@@ -149,7 +149,9 @@ class MultiMethodInliner {
       const std::unordered_map<const DexMethod*, size_t>*
           same_method_implementations = nullptr,
       bool analyze_and_prune_inits = false,
-      const std::unordered_set<DexMethodRef*>& configured_pure_methods = {});
+      const std::unordered_set<DexMethodRef*>& configured_pure_methods = {},
+      const std::unordered_set<DexString*>& configured_finalish_field_names =
+          {});
 
   ~MultiMethodInliner() { delayed_invoke_direct_to_static(); }
 
@@ -297,7 +299,7 @@ class MultiMethodInliner {
    */
   bool cross_store_reference(const DexMethod* caller, const DexMethod* callee);
 
-  bool is_estimate_over_max(uint64_t estimated_insn_size,
+  bool is_estimate_over_max(uint64_t estimated_caller_size,
                             const DexMethod* callee,
                             uint64_t max);
 
@@ -633,6 +635,7 @@ class MultiMethodInliner {
       m_same_method_implementations;
 
   std::unordered_set<DexMethodRef*> m_pure_methods;
+  std::unordered_set<DexString*> m_finalish_field_names;
 
   // Whether to do some deep analysis to determine if constructor candidates
   // can be safely inlined, and don't inline them otherwise.

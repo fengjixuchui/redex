@@ -8,6 +8,7 @@
 #include "ClassMergingPass.h"
 
 #include "ClassMerging.h"
+#include "ConfigFiles.h"
 #include "DexUtil.h"
 #include "MergingStrategies.h"
 #include "Show.h"
@@ -132,7 +133,7 @@ void ClassMergingPass::bind_config() {
   bool process_method_meta;
   bind("process_method_meta", false, process_method_meta);
   int64_t max_num_dispatch_target;
-  bind("max_num_dispatch_target", {0}, max_num_dispatch_target);
+  bind("max_num_dispatch_target", 0, max_num_dispatch_target);
   bool merge_static_methods_within_shape;
   bind("merge_static_methods_within_shape", false,
        merge_static_methods_within_shape);
@@ -257,6 +258,12 @@ void ClassMergingPass::run_pass(DexStoresVector& stores,
   for (ModelSpec& model_spec : m_model_specs) {
     if (!model_spec.enabled) {
       continue;
+    }
+    if (conf.force_single_dex() && !model_spec.include_primary_dex) {
+      TRACE(CLMG, 2,
+            "Change include_primary_dex to true because the apk will be single "
+            "dex");
+      model_spec.include_primary_dex = true;
     }
     class_merging::merge_model(scope, conf, mgr, stores, model_spec);
   }

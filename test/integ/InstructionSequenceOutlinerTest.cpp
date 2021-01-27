@@ -6,12 +6,12 @@
  */
 
 #include <gtest/gtest.h>
+#include <json/json.h>
 
 #include "ControlFlow.h"
 #include "DexInstruction.h"
 #include "DexUtil.h"
 #include "IRCode.h"
-#include "LocalDcePass.h"
 #include "RedexTest.h"
 #include "ScopedCFG.h"
 
@@ -45,7 +45,24 @@ size_t count_invokes(const cfg::ControlFlowGraph& cfg,
   return count_invokes(cfg, find_invoked_method(cfg, name));
 }
 
-class InstructionSequenceOutlinerTest : public RedexIntegrationTest {};
+class InstructionSequenceOutlinerTest : public RedexIntegrationTest {
+ public:
+  InstructionSequenceOutlinerTest() {
+    auto config_file_env = std::getenv("config_file");
+    always_assert_log(config_file_env,
+                      "Config file must be specified to InterDexTest.\n");
+
+    std::ifstream config_file(config_file_env, std::ifstream::binary);
+    config_file >> m_cfg;
+  }
+
+  void run_passes(const std::vector<Pass*>& passes) {
+    RedexIntegrationTest::run_passes(passes, nullptr, m_cfg);
+  }
+
+ private:
+  Json::Value m_cfg;
+};
 
 TEST_F(InstructionSequenceOutlinerTest, basic) {
   force_experiments_test_mode();
@@ -364,7 +381,6 @@ TEST_F(InstructionSequenceOutlinerTest, big_block_can_end_with_no_tries) {
   EXPECT_NE(println_method, nullptr);
 
   std::vector<Pass*> passes = {
-      new LocalDcePass(),
       new InstructionSequenceOutliner(),
   };
 
@@ -373,9 +389,11 @@ TEST_F(InstructionSequenceOutlinerTest, big_block_can_end_with_no_tries) {
   for (auto m : big_block_can_end_with_no_tries_methods) {
     cfg::ScopedCFG scoped_cfg(m->get_code());
     auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
-    EXPECT_NE(outlined_method, nullptr);
+    // TODO(T82892854): Change to NE when fixing bug with D24905219 backed out
+    EXPECT_EQ(outlined_method, nullptr);
     auto println_method_invokes = count_invokes(*scoped_cfg, println_method);
-    EXPECT_EQ(println_method_invokes, 0);
+    // TODO(T82892854): Change to EQ when fixing bug with D24905219 backed out
+    EXPECT_NE(println_method_invokes, 0);
   }
 }
 

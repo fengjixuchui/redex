@@ -52,6 +52,14 @@ struct ConfigFiles {
     return m_coldstart_classes;
   }
 
+  /**
+   * NOTE: ONLY use if you know what you are doing!
+   */
+  void update_coldstart_classes(
+      std::vector<std::string> new_coldstart_classes) {
+    m_coldstart_classes = std::move(new_coldstart_classes);
+  }
+
   void ensure_class_lists_loaded() {
     if (!m_load_class_lists_attempted) {
       m_load_class_lists_attempted = true;
@@ -84,6 +92,7 @@ struct ConfigFiles {
 
   const std::unordered_set<DexType*>& get_no_optimizations_annos();
   const std::unordered_set<DexMethodRef*>& get_pure_methods();
+  const std::unordered_set<DexString*>& get_finalish_field_names();
 
   const std::unordered_set<std::string>&
   get_method_sorting_allowlisted_substrings() const {
@@ -140,6 +149,8 @@ struct ConfigFiles {
    */
   void load(const Scope& scope);
 
+  bool force_single_dex() const;
+
  private:
   JsonWrapper m_json;
   std::string outdir;
@@ -168,6 +179,9 @@ struct ConfigFiles {
   std::unordered_set<DexType*> m_no_optimizations_annos;
   // global pure methods
   std::unordered_set<DexMethodRef*> m_pure_methods;
+  // names of fields that behave similar to final fields, i.e. written once
+  // before use
+  std::unordered_set<DexString*> m_finalish_field_names;
   // Global inliner config.
   std::unique_ptr<inliner::InlinerConfig> m_inliner_config;
   // min_sdk AndroidAPI

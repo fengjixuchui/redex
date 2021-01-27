@@ -30,10 +30,6 @@ namespace {
 
 constexpr bool DEBUG_CFG = false;
 constexpr size_t BIT_VECTOR_SIZE = 16;
-// A single onMethodExit call passes up to 7 vectors. Let's have at most 2
-// onMethodExits, which is 7 * 2 * 16 = 224 blocks.
-constexpr size_t MAX_BLOCKS = 7 * 2 * 16;
-
 constexpr int PROFILING_DATA_VERSION = 3;
 
 using OnMethodExitMap =
@@ -48,6 +44,14 @@ enum class BlockType {
   Normal = 1 << 3,
   Catch = 1 << 4,
   MoveException = 1 << 5,
+};
+
+enum class InstrumentedType {
+  // Too many basic blocks. We only did method tracing.
+  MethodOnly = 1,
+  Both = 2,
+  // Rare cases: due to infinite loops, no onMethodExit was instrumented.
+  UnableToTrackBlock = 3,
 };
 
 inline BlockType operator|(BlockType a, BlockType b) {
@@ -95,12 +99,95 @@ struct MethodInfo {
   size_t num_instrumented_blocks = 0;
 
   std::vector<cfg::BlockId> bit_id_2_block_id;
+  std::vector<std::vector<const SourceBlock*>> bit_id_2_source_blocks;
   std::map<cfg::BlockId, BlockType> rejected_blocks;
 };
 
-void write_metadata(const std::string& file_name,
+InstrumentedType get_instrumented_type(const MethodInfo& i) {
+  if (i.too_many_blocks) {
+    return InstrumentedType::MethodOnly;
+  } else if (i.num_exit_calls == 0 && i.num_vectors != 0) {
+    return InstrumentedType::UnableToTrackBlock;
+  } else {
+    return InstrumentedType::Both;
+  }
+}
+
+using MethodDictionary = std::unordered_map<const DexMethodRef*, size_t>;
+
+MethodDictionary create_method_dictionary(
+    const std::string& file_name, const std::vector<MethodInfo>& all_info) {
+  std::unordered_set<const DexMethodRef*> methods_set;
+  for (const auto& info : all_info) {
+    methods_set.insert(info.method);
+    for (const auto& sb_vec : info.bit_id_2_source_blocks) {
+      for (const auto* sb : sb_vec) {
+        methods_set.insert(sb->src);
+      }
+    }
+  }
+  std::vector<const DexMethodRef*> methods(methods_set.begin(),
+                                           methods_set.end());
+  std::sort(methods.begin(), methods.end(), compare_dexmethods);
+  size_t idx{0};
+
+  std::ofstream ofs(file_name, std::ofstream::out | std::ofstream::trunc);
+  MethodDictionary method_dictionary;
+  for (const auto* m : methods) {
+    method_dictionary.emplace(m, idx);
+    ofs << idx << "," << show_deobfuscated(m) << "\n";
+    ++idx;
+  }
+
+  return method_dictionary;
+}
+
+std::ostream& print_source_blocks(
+    std::ostream& os,
+    const MethodDictionary& dict,
+    const std::vector<const SourceBlock*>& blocks) {
+  bool first = true;
+  for (auto* sb : blocks) {
+    if (first) {
+      first = false;
+    } else {
+      os << ";";
+    }
+    os << dict.at(sb->src) << "#" << sb->id;
+  }
+  return os;
+}
+
+std::ostream& write_source_blocks_for_method(std::ostream& os,
+                                             const MethodDictionary& dict,
+                                             const MethodInfo& info) {
+  os << dict.at(info.method);
+  for (const auto& v : info.bit_id_2_source_blocks) {
+    os << ",";
+    print_source_blocks(os, dict, v);
+  }
+  os << "\n";
+  return os;
+}
+
+std::ofstream create_bits_to_source_blocks_file(const ConfigFiles& cfg) {
+  std::ofstream sb_ofs(cfg.metafile("redex-block-bits-to-source-blocks.csv"),
+                       std::ofstream::out | std::ofstream::trunc);
+
+  sb_ofs << "# Block bits to source blocks v1\n";
+
+  return sb_ofs;
+}
+
+void write_metadata(const ConfigFiles& cfg,
+                    const std::string& metadata_base_file_name,
                     const std::vector<MethodInfo>& all_info) {
+  auto method_dictionary = create_method_dictionary(
+      cfg.metafile("redex-source-block-method-dictionary.csv"), all_info);
+  auto sb_ofs = create_bits_to_source_blocks_file(cfg);
+
   // Write a short metadata of this metadata file in the first two lines.
+  auto file_name = cfg.metafile(metadata_base_file_name);
   std::ofstream ofs(file_name, std::ofstream::out | std::ofstream::trunc);
   ofs << "profile_type,version,num_methods" << std::endl;
   ofs << "basic-block-tracing," << PROFILING_DATA_VERSION << ","
@@ -137,25 +224,11 @@ void write_metadata(const std::string& file_name,
     return ss.str();
   };
 
-  // 'instrument' column:
-  // - 1: method only
-  // - 2: method + blocks
-  // - 3: method + blocks, but no onMethodExit. We can't track blocks.
-  auto instrumented = [](const MethodInfo& i) {
-    if (i.too_many_blocks) {
-      return 1;
-    } else if (i.num_exit_calls == 0 && i.num_vectors != 0) {
-      return 3;
-    } else {
-      return 2;
-    }
-  };
-
   for (const auto& info : all_info) {
     const std::array<std::string, 8> fields = {
         std::to_string(info.offset),
         info.method->get_deobfuscated_name(),
-        std::to_string(instrumented(info)),
+        std::to_string(static_cast<int>(get_instrumented_type(info))),
         std::to_string(info.num_non_entry_blocks),
         std::to_string(info.num_vectors),
         to_hex(info.signature),
@@ -163,6 +236,19 @@ void write_metadata(const std::string& file_name,
         rejected_blocks(info.rejected_blocks),
     };
     ofs << boost::algorithm::join(fields, ",") << "\n";
+  }
+
+  // The CSV looks nicer if we sort the methods, especially since they're only
+  // indexed.
+  std::vector<const MethodInfo*> sorted;
+  sorted.reserve(all_info.size());
+  std::transform(all_info.begin(), all_info.end(), std::back_inserter(sorted),
+                 [](const MethodInfo& i) { return &i; });
+  std::sort(sorted.begin(), sorted.end(), [](auto* lhs, auto* rhs) {
+    return compare_dexmethods(lhs->method, rhs->method);
+  });
+  for (const auto* info : sorted) {
+    write_source_blocks_for_method(sb_ofs, method_dictionary, *info);
   }
 
   TRACE(INSTRUMENT, 2, "Metadata file was written to: %s", SHOW(file_name));
@@ -408,7 +494,7 @@ size_t insert_onMethodExit_calls(
   return exit_blocks.size();
 }
 
-BlockInfo create_block_info(cfg::Block* block) {
+BlockInfo create_block_info(cfg::Block* block, bool instrument_catches) {
   if (block->num_opcodes() == 0) {
     return {block, BlockType::Empty, {}};
   }
@@ -416,7 +502,7 @@ BlockInfo create_block_info(cfg::Block* block) {
   // TODO: There is a potential register allocation issue when we instrument
   // extremely large number of basic blocks. We've found a case. So, for now,
   // we don't instrument catch blocks with the hope these blocks are cold.
-  if (block->is_catch()) {
+  if (block->is_catch() && !instrument_catches) {
     return {block, BlockType::Catch, {}};
   }
 
@@ -444,12 +530,24 @@ BlockInfo create_block_info(cfg::Block* block) {
   return {block, BlockType::Instrumentable | type, insert_pos};
 }
 
-auto get_blocks_to_instrument(const cfg::ControlFlowGraph& cfg) {
+auto get_blocks_to_instrument(const cfg::ControlFlowGraph& cfg,
+                              const size_t max_num_blocks,
+                              bool instrument_catches) {
   auto blocks = graph::postorder_sort<cfg::GraphInterface>(cfg);
 
-  // We don't need to instrument entry block obviously.
-  assert(blocks.back() == cfg.entry_block());
-  blocks.pop_back();
+  // We don't instrument entry block.
+  //
+  // But there's an exceptional case. If the entry block is in a try-catch,
+  // which happens very rarely, inserting onMethodBegin will create an
+  // additional block because onMethodBegin may throw. The original entry block
+  // becomes non-entry. In this case, we still need to instrument the entry
+  // block at this moment. See testFunc10 in InstrumentBasicBlockTarget.java.
+  //
+  // So, remove entry block only if entry block isn't in any try-catch.
+  if (cfg.entry_block()->get_outgoing_throws_in_order().empty()) {
+    assert(blocks.back() == cfg.entry_block());
+    blocks.pop_back();
+  }
 
   // Convert to reverse postorder (RPO).
   std::reverse(blocks.begin(), blocks.end());
@@ -459,10 +557,10 @@ auto get_blocks_to_instrument(const cfg::ControlFlowGraph& cfg) {
   block_info_list.reserve(blocks.size());
   BitId id = 0;
   for (cfg::Block* b : blocks) {
-    block_info_list.emplace_back(create_block_info(b));
+    block_info_list.emplace_back(create_block_info(b, instrument_catches));
     auto& info = block_info_list.back();
     if ((info.type & BlockType::Instrumentable) == BlockType::Instrumentable) {
-      if (id >= MAX_BLOCKS) {
+      if (id >= max_num_blocks) {
         return std::make_tuple(std::vector<BlockInfo>{}, BitId(0),
                                true /* too many block */);
       }
@@ -493,16 +591,31 @@ void insert_block_coverage_computations(const std::vector<BlockInfo>& blocks,
   }
 }
 
+std::vector<const SourceBlock*> gather_source_blocks(const cfg::Block* b) {
+  std::vector<const SourceBlock*> ret;
+  for (const auto& mie : *b) {
+    if (mie.type != MFLOW_SOURCE_BLOCK) {
+      continue;
+    }
+    ret.push_back(mie.src_block.get());
+  }
+  return ret;
+}
+
 MethodInfo instrument_basic_blocks(IRCode& code,
                                    DexMethod* method,
                                    DexMethod* onMethodBegin,
                                    const OnMethodExitMap& onMethodExit_map,
                                    const size_t max_vector_arity,
-                                   const size_t method_offset) {
+                                   const size_t method_offset,
+                                   const size_t max_num_blocks,
+                                   bool instrument_catches) {
   using namespace cfg;
 
   code.build_cfg(/*editable*/ true);
   ControlFlowGraph& cfg = code.cfg();
+
+  const std::string& before_cfg = show(cfg);
 
   // Step 1: Get sorted basic blocks to instrument with their information.
   //
@@ -512,7 +625,7 @@ MethodInfo instrument_basic_blocks(IRCode& code,
   size_t num_to_instrument;
   bool too_many_blocks;
   std::tie(blocks, num_to_instrument, too_many_blocks) =
-      get_blocks_to_instrument(cfg);
+      get_blocks_to_instrument(cfg, max_num_blocks, instrument_catches);
 
   if (DEBUG_CFG) {
     TRACE(INSTRUMENT, 9, "BEFORE: %s, %s", show_deobfuscated(method).c_str(),
@@ -523,12 +636,14 @@ MethodInfo instrument_basic_blocks(IRCode& code,
   // Step 2: Insert onMethodBegin to track method execution, and bit-vector
   //         allocation code in its method entry point.
   //
+  const size_t origin_num_non_entry_blocks = cfg.blocks().size() - 1;
   const size_t num_vectors =
       std::ceil(num_to_instrument / double(BIT_VECTOR_SIZE));
   std::vector<reg_t> reg_vectors;
   reg_t reg_method_offset;
   std::tie(reg_vectors, reg_method_offset) =
       insert_prologue_insts(cfg, onMethodBegin, num_vectors, method_offset);
+  const size_t after_prologue_num_non_entry_blocks = cfg.blocks().size() - 1;
 
   // Step 3: Insert onMethodExit in exit block(s).
   //
@@ -568,9 +683,11 @@ MethodInfo instrument_basic_blocks(IRCode& code,
   always_assert(count(BlockType::Instrumentable) == num_to_instrument);
 
   info.bit_id_2_block_id.reserve(num_to_instrument);
+  info.bit_id_2_source_blocks.reserve(num_to_instrument);
   for (const auto& i : blocks) {
     if (i.is_instrumentable()) {
       info.bit_id_2_block_id.push_back(i.block->id());
+      info.bit_id_2_source_blocks.emplace_back(gather_source_blocks(i.block));
     } else {
       info.rejected_blocks[i.block->id()] = i.type;
     }
@@ -580,6 +697,26 @@ MethodInfo instrument_basic_blocks(IRCode& code,
     TRACE(INSTRUMENT, 9, "AFTER: %s, %s", show_deobfuscated(method).c_str(),
           SHOW(method));
     TRACE(INSTRUMENT, 9, "%s", SHOW(cfg));
+  }
+
+  // Check the post condition:
+  //   num_instrumented_blocks == num_non_entry_blocks - num_rejected_blocks
+  if (get_instrumented_type(info) != InstrumentedType::MethodOnly &&
+      info.bit_id_2_block_id.size() !=
+          info.num_non_entry_blocks - info.rejected_blocks.size()) {
+    TRACE(INSTRUMENT, 7, "Post condition violation! in %s", SHOW(method));
+    TRACE(INSTRUMENT, 7, "- Instrumented type: %d",
+          get_instrumented_type(info));
+    TRACE(INSTRUMENT, 7, "  %zu != %zu - %zu", info.bit_id_2_block_id.size(),
+          info.num_non_entry_blocks, info.rejected_blocks.size());
+    TRACE(INSTRUMENT, 7, "  original non-entry blocks: %zu",
+          origin_num_non_entry_blocks);
+    TRACE(INSTRUMENT, 7, "  after prologue instrumentation: %zu",
+          after_prologue_num_non_entry_blocks);
+    TRACE(INSTRUMENT, 7, "===== BEFORE CFG");
+    TRACE(INSTRUMENT, 7, "%s", SHOW(before_cfg));
+    TRACE(INSTRUMENT, 7, "===== AFTER CFG");
+    TRACE(INSTRUMENT, 7, "%s", SHOW(cfg));
   }
 
   code.clear_cfg();
@@ -600,7 +737,8 @@ std::unordered_set<std::string> get_cold_start_classes(ConfigFiles& cfg) {
   return cold_start_classes;
 }
 
-void print_stats(const std::vector<MethodInfo>& instrumented_methods) {
+void print_stats(const std::vector<MethodInfo>& instrumented_methods,
+                 const size_t max_num_blocks) {
   const size_t total_instrumented = instrumented_methods.size();
   const size_t total_block_instrumented =
       std::count_if(instrumented_methods.begin(), instrumented_methods.end(),
@@ -628,7 +766,7 @@ void print_stats(const std::vector<MethodInfo>& instrumented_methods) {
 
   // ----- Print summary
   TRACE(INSTRUMENT, 4, "Maximum blocks for block instrumentation: %zu",
-        MAX_BLOCKS);
+        max_num_blocks);
   TRACE(INSTRUMENT, 4, "Total instrumented: %zu", total_instrumented);
   TRACE(INSTRUMENT, 4, "- Block + method instrumented: %zu",
         total_block_instrumented);
@@ -691,7 +829,14 @@ void print_stats(const std::vector<MethodInfo>& instrumented_methods) {
   const int total_catches = std::accumulate(
       instrumented_methods.begin(), instrumented_methods.end(), int(0),
       [](int a, auto&& i) { return a + i.num_catches; });
-  TRACE(INSTRUMENT, 4, "Ignored catch blocks: %d", total_catches);
+  const int total_instrumented_catches = std::accumulate(
+      instrumented_methods.begin(), instrumented_methods.end(), int(0),
+      [](int a, auto&& i) { return a + i.num_instrumented_catches; });
+  TRACE(INSTRUMENT, 4, "Total catch blocks: %d", total_catches);
+  TRACE(INSTRUMENT, 4, "Instrumented catch blocks: %d",
+        total_instrumented_catches);
+  TRACE(INSTRUMENT, 4, "Ignored catch blocks: %d",
+        total_catches - total_instrumented_catches);
 
   // ----- Instrumented exit block stats
   TRACE(INSTRUMENT, 4, "Instrumented exit block stats:");
@@ -767,9 +912,9 @@ void print_stats(const std::vector<MethodInfo>& instrumented_methods) {
   };
 
   TRACE(INSTRUMENT, 4, "Empty / useless block stats:");
-  print_two_dists("empty", "useless",
-                  [](auto&& v) { return v.num_empty_blocks; },
-                  [](auto&& v) { return v.num_useless_blocks; });
+  print_two_dists(
+      "empty", "useless", [](auto&& v) { return v.num_empty_blocks; },
+      [](auto&& v) { return v.num_useless_blocks; });
 }
 
 } // namespace
@@ -821,6 +966,8 @@ void BlockInstrumentHelper::do_basic_block_tracing(
                       "[InstrumentPass] error: basic block profiling must have "
                       "two analysis methods: [onMethodBegin, onMethodExit]");
   }
+
+  const size_t max_num_blocks = options.max_num_blocks;
 
   // Even so, we need to update sharded arrays with 1 for the Java-side code.
   const auto& array_fields = InstrumentPass::patch_sharded_arrays(
@@ -894,9 +1041,9 @@ void BlockInstrumentHelper::do_basic_block_tracing(
       return;
     }
 
-    instrumented_methods.emplace_back(
-        instrument_basic_blocks(code, method, onMethodBegin, onMethodExit_map,
-                                max_vector_arity, method_offset));
+    instrumented_methods.emplace_back(instrument_basic_blocks(
+        code, method, onMethodBegin, onMethodExit_map, max_vector_arity,
+        method_offset, max_num_blocks, options.instrument_catches));
 
     const auto& method_info = instrumented_methods.back();
     if (method_info.too_many_blocks) {
@@ -927,10 +1074,9 @@ void BlockInstrumentHelper::do_basic_block_tracing(
       analysis_cls, field->get_name()->str(),
       static_cast<int>(ProfileTypeFlags::BasicBlockTracing));
 
-  write_metadata(cfg.metafile(options.metadata_file_name),
-                 instrumented_methods);
+  write_metadata(cfg, options.metadata_file_name, instrumented_methods);
 
-  print_stats(instrumented_methods);
+  print_stats(instrumented_methods, max_num_blocks);
 
   TRACE(INSTRUMENT, 4, "Instrumentation selection stats:");
   TRACE(INSTRUMENT, 4, "- All methods: %d", all_methods);

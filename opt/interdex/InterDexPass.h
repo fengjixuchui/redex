@@ -41,6 +41,8 @@ constexpr const char* METRIC_RELOCATED_NON_STATIC_DIRECT_METHODS =
     "num_relocated_non_static_direct_methods";
 constexpr const char* METRIC_RELOCATED_VIRTUAL_METHODS =
     "num_relocated_virtual_methods";
+constexpr const char* METRIC_CURRENT_CLASSES_WHEN_EMITTING_REMAINING =
+    "num_current_classes_when_emitting_remaining";
 
 constexpr const char* METRIC_RESERVED_FREFS = "reserved_frefs";
 constexpr const char* METRIC_RESERVED_TREFS = "reserved_trefs";
@@ -86,12 +88,15 @@ class InterDexPass : public Pass {
   size_t m_run{0}; // Which iteration of `run_pass`.
   size_t m_eval{0}; // How many `eval_pass` iterations.
 
-  virtual void run_pass(DexStoresVector&,
+  virtual void run_pass(const Scope&,
+                        const XStoreRefs&,
+                        DexStoresVector&,
                         DexClassesVector&,
                         ConfigFiles&,
                         PassManager&);
 
-  void run_pass_on_nonroot_store(DexStoresVector&,
+  void run_pass_on_nonroot_store(const Scope&,
+                                 const XStoreRefs&,
                                  DexClassesVector&,
                                  ConfigFiles&,
                                  PassManager&);

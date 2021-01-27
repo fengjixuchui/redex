@@ -69,28 +69,29 @@ std::unordered_set<DexClass*> find_unrefenced_coldstart_classes(
     old_no_ref = new_no_ref;
     new_no_ref = 0;
     cold_cold_references.clear();
-    walk::code(input_scope,
-               [&](DexMethod* meth) {
-                 return coldstart_classes.count(meth->get_class()) > 0;
-               },
-               [&](DexMethod* meth, const IRCode& code) {
-                 auto base_cls = meth->get_class();
-                 for (auto& mie : InstructionIterable(meth->get_code())) {
-                   auto inst = mie.insn;
-                   DexType* called_cls = nullptr;
-                   if (inst->has_method()) {
-                     called_cls = inst->get_method()->get_class();
-                   } else if (inst->has_field()) {
-                     called_cls = inst->get_field()->get_class();
-                   } else if (inst->has_type()) {
-                     called_cls = inst->get_type();
-                   }
-                   if (called_cls != nullptr && base_cls != called_cls &&
-                       coldstart_classes.count(called_cls) > 0) {
-                     cold_cold_references.insert(called_cls);
-                   }
-                 }
-               });
+    walk::code(
+        input_scope,
+        [&](DexMethod* meth) {
+          return coldstart_classes.count(meth->get_class()) > 0;
+        },
+        [&](DexMethod* meth, const IRCode& code) {
+          auto base_cls = meth->get_class();
+          for (auto& mie : InstructionIterable(meth->get_code())) {
+            auto inst = mie.insn;
+            DexType* called_cls = nullptr;
+            if (inst->has_method()) {
+              called_cls = inst->get_method()->get_class();
+            } else if (inst->has_field()) {
+              called_cls = inst->get_field()->get_class();
+            } else if (inst->has_type()) {
+              called_cls = inst->get_type();
+            }
+            if (called_cls != nullptr && base_cls != called_cls &&
+                coldstart_classes.count(called_cls) > 0) {
+              cold_cold_references.insert(called_cls);
+            }
+          }
+        });
     for (const auto& cls : scope) {
       // Make sure we don't drop classes which might be
       // called from native code.
@@ -186,6 +187,7 @@ void do_order_classes(const std::vector<std::string>& coldstart_class_names,
     if (DexType* type = DexType::get_type(class_name.c_str())) {
       if (auto cls = type_class(type)) {
         class_to_priority[cls] = priority++;
+        cls->set_perf_sensitive(true);
       }
     }
   }
@@ -205,6 +207,62 @@ void do_order_classes(const std::vector<std::string>& coldstart_class_names,
         }
         return left_priority < right_priority;
       });
+}
+
+// Compare two classes for sorting in a way that is best for compression.
+bool compare_dexclasses_for_compressed_size(DexClass* c1, DexClass* c2) {
+  // Canary classes go first
+  if (interdex::is_canary(c1) != interdex::is_canary(c2)) {
+    return (interdex::is_canary(c1) ? 1 : 0) >
+           (interdex::is_canary(c2) ? 1 : 0);
+  }
+  // Interfaces go after non-interfaces
+  if (is_interface(c1) != is_interface(c2)) {
+    return (is_interface(c1) ? 1 : 0) < (is_interface(c2) ? 1 : 0);
+  }
+  // Base types and implemented interfaces go last
+  if (type::check_cast(c2->get_type(), c1->get_type())) {
+    return false;
+  }
+  always_assert(c1 != c2);
+  if (type::check_cast(c1->get_type(), c2->get_type())) {
+    return true;
+  }
+  // If types are unrelated, sort by super-classes and then
+  // interfaces
+  if (c1->get_super_class() != c2->get_super_class()) {
+    return compare_dextypes(c1->get_super_class(), c2->get_super_class());
+  }
+  if (c1->get_interfaces() != c2->get_interfaces()) {
+    return compare_dextypelists(c1->get_interfaces(), c2->get_interfaces());
+  }
+  // Tie-breaker: fields/methods count distance
+  int dmethods_distance =
+      (int)c1->get_dmethods().size() - (int)c2->get_dmethods().size();
+  if (dmethods_distance != 0) {
+    return dmethods_distance < 0;
+  }
+  int vmethods_distance =
+      (int)c1->get_vmethods().size() - (int)c2->get_vmethods().size();
+  if (vmethods_distance != 0) {
+    return vmethods_distance < 0;
+  }
+  int ifields_distance =
+      (int)c1->get_ifields().size() - (int)c2->get_ifields().size();
+  if (ifields_distance != 0) {
+    return ifields_distance < 0;
+  }
+  int sfields_distance =
+      (int)c1->get_sfields().size() - (int)c2->get_sfields().size();
+  if (sfields_distance != 0) {
+    return sfields_distance < 0;
+  }
+  // Tie-breaker: has-class-data
+  if (c1->has_class_data() != c2->has_class_data()) {
+    return (c1->has_class_data() ? 1 : 0) < (c2->has_class_data() ? 1 : 0);
+  }
+  // Final tie-breaker: Compare types, which means names
+  return compare_dextypes(c1->get_type(), c2->get_type());
 }
 
 } // namespace
@@ -303,8 +361,8 @@ bool InterDex::emit_class(DexInfo& dex_info,
 
 void InterDex::emit_primary_dex(
     const DexClasses& primary_dex,
-    const std::vector<DexType*>& interdex_types,
-    const std::unordered_set<DexClass*>& unreferenced_cls) {
+    const std::vector<DexType*>& interdex_order,
+    const std::unordered_set<DexClass*>& unreferenced_classes) {
 
   std::unordered_set<DexClass*> primary_dex_set(primary_dex.begin(),
                                                 primary_dex.end());
@@ -318,14 +376,14 @@ void InterDex::emit_primary_dex(
   // Sort the primary dex according to interdex order (aka emit first the
   // primary classes that appear in the interdex order, in the order that
   // they appear there).
-  for (DexType* type : interdex_types) {
+  for (DexType* type : interdex_order) {
     DexClass* cls = type_class(type);
     if (!cls) {
       continue;
     }
 
     if (primary_dex_set.count(cls) > 0) {
-      if (unreferenced_cls.count(cls) > 0) {
+      if (unreferenced_classes.count(cls) > 0) {
         TRACE(IDEX, 5, "[primary dex]: %s no longer linked to coldstart set.",
               SHOW(cls));
         coldstart_classes_skipped_in_primary++;
@@ -341,7 +399,7 @@ void InterDex::emit_primary_dex(
   // Now add the rest.
   for (DexClass* cls : primary_dex) {
     emit_class(primary_dex_info, cls, /* check_if_skip */ true,
-               /* perf_sensitive */ true);
+               /* perf_sensitive */ false);
   }
   TRACE(IDEX, 2,
         "[primary dex]: %d out of %d classes in primary dex "
@@ -681,9 +739,22 @@ void InterDex::init_cross_dex_ref_minimizer_and_relocate_methods() {
   for (DexClass* cls : classes_to_insert) {
     m_cross_dex_ref_minimizer.insert(cls);
   }
+
+  // A few classes might have already been emitted to the current dex which we
+  // are about to fill up. Make it so that the minimizer knows that all the refs
+  // of those classes have already been emitted.
+  for (auto cls : m_dexes_structure.get_current_dex_classes()) {
+    m_cross_dex_ref_minimizer.sample(cls);
+    m_cross_dex_ref_minimizer.insert(cls);
+    m_cross_dex_ref_minimizer.erase(cls, /* emitted */ true,
+                                    /* overflowed */ false);
+  }
 }
 
 void InterDex::emit_remaining_classes(DexInfo& dex_info) {
+  m_current_classes_when_emitting_remaining =
+      m_dexes_structure.get_current_dex_classes().size();
+
   if (!m_minimize_cross_dex_refs) {
     for (DexClass* cls : m_scope) {
       emit_class(dex_info, cls, /* check_if_skip */ true,
@@ -703,8 +774,22 @@ void InterDex::emit_remaining_classes(DexInfo& dex_info) {
   //   refs
   bool pick_worst = true;
   while (!m_cross_dex_ref_minimizer.empty()) {
-    DexClass* cls = pick_worst ? m_cross_dex_ref_minimizer.worst()
-                               : m_cross_dex_ref_minimizer.front();
+    DexClass* cls{nullptr};
+    if (pick_worst) {
+      // Figure out which class has the most unapplied references
+      auto worst = m_cross_dex_ref_minimizer.worst();
+      // Use that worst class if it has more unapplied refs than already applied
+      // refs
+      if (m_cross_dex_ref_minimizer.get_unapplied_refs(worst) >
+          m_cross_dex_ref_minimizer.get_applied_refs()) {
+        cls = worst;
+      }
+    }
+    if (!cls) {
+      // Default case
+      cls = m_cross_dex_ref_minimizer.front();
+    }
+
     std::vector<DexClass*> erased_classes;
     bool emitted = emit_class(dex_info, cls, /* check_if_skip */ false,
                               /* perf_sensitive */ false, &erased_classes);
@@ -858,7 +943,7 @@ void InterDex::run() {
 
 void InterDex::run_on_nonroot_store() {
   TRACE(IDEX, 2, "IDEX: Running on non-root store");
-  for (DexClass* cls : m_original_scope) {
+  for (DexClass* cls : m_scope) {
     emit_class(EMPTY_DEX_INFO, cls, /* check_if_skip */ false,
                /* perf_sensitive */ false);
   }
@@ -927,81 +1012,48 @@ void InterDex::flush_out_dex(DexInfo& dex_info) {
     m_dex_infos.emplace_back(std::make_tuple(canary_name, dex_info));
   }
 
+  std::unordered_set<DexClass*> additional_classes;
   for (auto& plugin : m_plugins) {
     DexClasses classes = m_dexes_structure.get_current_dex_classes();
     const DexClasses& squashed_classes =
         m_dexes_structure.get_current_dex_squashed_classes();
     classes.insert(classes.end(), squashed_classes.begin(),
                    squashed_classes.end());
-    auto add_classes = plugin->additional_classes(m_outdex, classes);
-    for (auto add_class : add_classes) {
+    for (auto cls : plugin->additional_classes(m_outdex, classes)) {
       TRACE(IDEX, 4, "IDEX: Emitting %s-plugin-generated class :: %s",
-            plugin->name().c_str(), SHOW(add_class));
-      m_dexes_structure.add_class_no_checks(add_class);
+            plugin->name().c_str(), SHOW(cls));
+      m_dexes_structure.add_class_no_checks(cls);
+      // If this is the primary dex, or if there are any betamap-ordered classes
+      // in this dex, then we treat the additional classes as perf-sensitive, to
+      // be conservative.
+      if (dex_info.primary || dex_info.betamap_ordered) {
+        cls->set_perf_sensitive(true);
+      }
+      additional_classes.insert(cls);
     }
   }
 
   {
     auto classes = m_dexes_structure.end_dex(dex_info);
-    if (m_sort_remaining_classes && !dex_info.primary &&
-        !dex_info.betamap_ordered) {
-      TRACE(IDEX, 2, "Sorting classes in secondary dex number %d",
-            m_dexes_structure.get_num_secondary_dexes());
-      std::sort(classes.begin(), classes.end(), [](DexClass* c1, DexClass* c2) {
-        // Canary classes go first
-        if (is_canary(c1) != is_canary(c2)) {
-          return (is_canary(c1) ? 1 : 0) > (is_canary(c2) ? 1 : 0);
-        }
-        // Interfaces go after non-interfaces
-        if (is_interface(c1) != is_interface(c2)) {
-          return (is_interface(c1) ? 1 : 0) < (is_interface(c2) ? 1 : 0);
-        }
-        // Base types and implemented interfaces go last
-        if (type::check_cast(c2->get_type(), c1->get_type())) {
-          return false;
-        }
-        always_assert(c1 != c2);
-        if (type::check_cast(c1->get_type(), c2->get_type())) {
-          return true;
-        }
-        // If types are unrelated, sort by super-classes and then
-        // interfaces
-        if (c1->get_super_class() != c2->get_super_class()) {
-          return compare_dextypes(c1->get_super_class(), c2->get_super_class());
-        }
-        if (c1->get_interfaces() != c2->get_interfaces()) {
-          return compare_dextypelists(c1->get_interfaces(),
-                                      c2->get_interfaces());
-        }
-        // Tie-breaker: fields/methods count distance
-        int dmethods_distance =
-            (int)c1->get_dmethods().size() - (int)c2->get_dmethods().size();
-        if (dmethods_distance != 0) {
-          return dmethods_distance < 0;
-        }
-        int vmethods_distance =
-            (int)c1->get_vmethods().size() - (int)c2->get_vmethods().size();
-        if (vmethods_distance != 0) {
-          return vmethods_distance < 0;
-        }
-        int ifields_distance =
-            (int)c1->get_ifields().size() - (int)c2->get_ifields().size();
-        if (ifields_distance != 0) {
-          return ifields_distance < 0;
-        }
-        int sfields_distance =
-            (int)c1->get_sfields().size() - (int)c2->get_sfields().size();
-        if (sfields_distance != 0) {
-          return sfields_distance < 0;
-        }
-        // Tie-breaker: has-class-data
-        if (c1->has_class_data() != c2->has_class_data()) {
-          return (c1->has_class_data() ? 1 : 0) <
-                 (c2->has_class_data() ? 1 : 0);
-        }
-        // Final tie-breaker: Compare types, which means names
-        return compare_dextypes(c1->get_type(), c2->get_type());
-      });
+    if (m_sort_remaining_classes) {
+      auto begin = classes.begin(), end = classes.end();
+      auto is_ordered = [&additional_classes](DexClass* cls) {
+        // Perf-sensitive classes, i.e. those in the primary dex and those from
+        // betamap-ordered classes are ordered; however, additional classes are
+        // not (they used to always just go at the very end; at the time of
+        // writing, we are talking about a single switch-inline dispatcher
+        // class).
+        return cls->is_perf_sensitive() && !additional_classes.count(cls);
+      };
+      // We skip over any initial ordered classes, and only order the rest.
+      for (; begin != end && is_ordered(*begin); begin++) {
+      }
+      TRACE(IDEX, 2, "Skipping %zu and sorting %zu classes",
+            std::distance(classes.begin(), begin), std::distance(begin, end));
+      // All remaining classes are unordered
+      always_assert(std::find_if(begin, end, is_ordered) == end);
+      // So then we sort
+      std::sort(begin, end, compare_dexclasses_for_compressed_size);
     }
     m_outdex.emplace_back(std::move(classes));
   }

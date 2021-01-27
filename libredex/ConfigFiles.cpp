@@ -89,6 +89,24 @@ const std::unordered_set<DexMethodRef*>& ConfigFiles::get_pure_methods() {
 }
 
 /**
+ * This function relies on the g_redex.
+ */
+const std::unordered_set<DexString*>& ConfigFiles::get_finalish_field_names() {
+  if (m_finalish_field_names.empty()) {
+    Json::Value finalish_field_names;
+    m_json.get("finalish_field_names", Json::nullValue, finalish_field_names);
+    if (!finalish_field_names.empty()) {
+      for (auto const& field_name : finalish_field_names) {
+        std::string name = field_name.asString();
+        DexString* str = DexString::make_string(name);
+        if (str) m_finalish_field_names.insert(str);
+      }
+    }
+  }
+  return m_finalish_field_names;
+}
+
+/**
  * Read an interdex list file and return as a vector of appropriately-formatted
  * classname strings.
  */
@@ -207,6 +225,7 @@ void ConfigFiles::load_inliner_config(inliner::InlinerConfig* inliner_config) {
   jw.get("run_cse", false, inliner_config->run_cse);
   jw.get("run_copy_prop", false, inliner_config->run_copy_prop);
   jw.get("run_local_dce", false, inliner_config->run_local_dce);
+  jw.get("run_reg_alloc", false, inliner_config->run_reg_alloc);
   jw.get("run_dedup_blocks", false, inliner_config->run_dedup_blocks);
   jw.get("debug", false, inliner_config->debug);
   jw.get("blocklist", {}, inliner_config->m_blocklist);
@@ -274,4 +293,8 @@ const api::AndroidSDK& ConfigFiles::get_android_sdk_api(int32_t min_sdk_api) {
 
 const ProguardMap& ConfigFiles::get_proguard_map() const {
   return *m_proguard_map;
+}
+
+bool ConfigFiles::force_single_dex() const {
+  return m_json.get("force_single_dex", false);
 }
