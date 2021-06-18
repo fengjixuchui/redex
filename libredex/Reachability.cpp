@@ -42,7 +42,8 @@ std::unique_ptr<ReachableObjects> setup_seeds_and_compute_reachable_objects(
     const std::function<void(RootSetMarker&, const Scope&)>&
         setup_root_set_marker,
     bool record_reachability,
-    std::unique_ptr<const mog::Graph>* out_method_override_graph) {
+    std::unique_ptr<const mog::Graph>* out_method_override_graph,
+    bool remove_no_argument_constructors) {
   Timer t("Marking");
   auto scope = build_class_scope(stores);
   auto reachable_objects = std::make_unique<ReachableObjects>();
@@ -59,21 +60,19 @@ std::unique_ptr<ReachableObjects> setup_seeds_and_compute_reachable_objects(
 
   size_t num_threads = redex_parallel::default_num_threads();
   auto stats_arr = std::make_unique<Stats[]>(num_threads);
-  auto work_queue = workqueue_foreach<ReachableObject>(
+  workqueue_run<ReachableObject>(
       [&](MarkWorkerState* worker_state, const ReachableObject& obj) {
         TransitiveClosureMarker transitive_closure_marker(
             ignore_sets, *method_override_graph, record_reachability,
             &cond_marked, reachable_objects.get(), worker_state,
-            &stats_arr[worker_state->worker_id()]);
+            &stats_arr[worker_state->worker_id()],
+            remove_no_argument_constructors);
         transitive_closure_marker.visit(obj);
         return nullptr;
       },
+      root_set,
       num_threads,
       /*push_tasks_while_running=*/true);
-  for (const auto& obj : root_set) {
-    work_queue.add_item(obj);
-  }
-  work_queue.run_all();
 
   if (num_ignore_check_strings != nullptr) {
     for (size_t i = 0; i < num_threads; ++i) {
@@ -453,7 +452,10 @@ void TransitiveClosureMarker::visit_cls(const DexClass* cls) {
     } else if (method::is_init(m)) {
       // Push the parameterless constructor, in case it's constructed via
       // .class or Class.forName()
-      if (m->get_proto()->get_args()->get_type_list().empty()) {
+      // if m_remove_no_argument_constructors, make an exception. This is only
+      // used for testing
+      if (!m_remove_no_argument_constructors &&
+          m->get_proto()->get_args()->get_type_list().empty()) {
         push(cls, m);
       }
     }
@@ -585,7 +587,8 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
     const std::unordered_set<const DexMethod*>& seeds,
     bool record_reachability,
     std::unique_ptr<const method_override_graph::Graph>*
-        out_method_override_graph) {
+        out_method_override_graph,
+    bool remove_no_argument_constructors) {
 
   always_assert(!seeds.empty());
   auto setup_root_set_marker = [&seeds](RootSetMarker& root_set_marker,
@@ -595,7 +598,8 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
 
   return setup_seeds_and_compute_reachable_objects(
       stores, ignore_sets, num_ignore_check_strings, setup_root_set_marker,
-      record_reachability, out_method_override_graph);
+      record_reachability, out_method_override_graph,
+      remove_no_argument_constructors);
 }
 
 std::unique_ptr<ReachableObjects> compute_reachable_objects(
@@ -604,7 +608,8 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
     int* num_ignore_check_strings,
     bool record_reachability,
     bool should_mark_all_as_seed,
-    std::unique_ptr<const mog::Graph>* out_method_override_graph) {
+    std::unique_ptr<const mog::Graph>* out_method_override_graph,
+    bool remove_no_argument_constructors) {
 
   auto setup_root_set_marker = [should_mark_all_as_seed](
                                    RootSetMarker& root_set_marker,
@@ -618,7 +623,8 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
 
   return setup_seeds_and_compute_reachable_objects(
       stores, ignore_sets, num_ignore_check_strings, setup_root_set_marker,
-      record_reachability, out_method_override_graph);
+      record_reachability, out_method_override_graph,
+      remove_no_argument_constructors);
 }
 
 void ReachableObjects::record_reachability(const DexMethodRef* member,

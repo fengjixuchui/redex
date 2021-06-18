@@ -194,7 +194,7 @@ struct LocksIterator : public ir_analyzer::BaseIRAnalyzer<LockEnvironment> {
     // OK, undo and return.
     LockType new_locks = locks ^ (1 << (max_d - 1));
     always_assert_log(
-        new_locks < locks, "%d x %d -> %d", locks, max_d, new_locks);
+        new_locks < locks, "%d x %zu -> %d", locks, max_d, new_locks);
     auto ret = exit_state_at_source;
     ret.set(def, LockDepths(new_locks));
     return ret;
@@ -244,14 +244,27 @@ struct LocksIterator : public ir_analyzer::BaseIRAnalyzer<LockEnvironment> {
     }
 
     LockType new_locks = old ^ (1 << (max_old_d - 1));
-    always_assert_log(new_locks < old, "%d x %d -> %d", old, max_d, new_locks);
+    always_assert_log(new_locks < old, "%d x %zu -> %d", old, max_d, new_locks);
     current_state->set(def, LockDepths(new_locks));
   }
 
   const RDefs& rdefs;
 };
 
-boost::optional<RDefs> compute_rdefs(ControlFlowGraph& cfg) {
+struct ComputeRDefsResult {
+  RDefs rdefs;
+  bool has_locks;
+  bool failure;
+
+  ComputeRDefsResult(bool has_locks, bool failure)
+      : has_locks(has_locks), failure(failure) {}
+
+  operator bool() const { // NOLINT(google-explicit-constructor)
+    return has_locks && !failure;
+  }
+};
+
+ComputeRDefsResult compute_rdefs(ControlFlowGraph& cfg) {
   std::unique_ptr<reaching_defs::MoveAwareFixpointIterator> rdefs;
   auto get_defs = [&](Block* b, const IRInstruction* i) {
     if (!rdefs) {
@@ -319,6 +332,14 @@ boost::optional<RDefs> compute_rdefs(ControlFlowGraph& cfg) {
     }
   }
 
+  if (monitor_insns.empty()) {
+    // This is possible if the IRCode check found instructions in
+    // unreachable code.
+    return ComputeRDefsResult(/*has_locks=*/false, /*failure=*/false);
+  }
+
+  ComputeRDefsResult ret(/*has_locks=*/true, /*failure=*/false);
+
   // Check that there is at most one monitor instruction per block.
   // We use that simplification later to not have to walk through
   // blocks.
@@ -327,13 +348,13 @@ boost::optional<RDefs> compute_rdefs(ControlFlowGraph& cfg) {
     for (auto* monitor_insn : monitor_insns) {
       auto b = block_map.at(monitor_insn);
       if (seen_blocks.count(b) > 0) {
-        return boost::none;
+        ret.failure = true;
+        return ret;
       }
       seen_blocks.insert(b);
     }
   }
 
-  RDefs ret;
   for (auto* monitor_insn : monitor_insns) {
     auto find_root_def = [&](IRInstruction* cur) -> IRInstruction* {
       for (;;) {
@@ -365,17 +386,17 @@ boost::optional<RDefs> compute_rdefs(ControlFlowGraph& cfg) {
 
     auto root_rdef = find_root_def(monitor_insn);
     if (root_rdef == nullptr) {
-      return boost::none;
+      ret.failure = true;
+      return ret;
     }
-    if (root_rdef != nullptr) {
-      ret.emplace(monitor_insn, root_rdef);
-    }
+    ret.rdefs.emplace(monitor_insn, root_rdef);
   }
 
   return ret;
 }
 
 LockEnvironment create_start(const RDefs& rdefs) {
+  redex_assert(!rdefs.empty());
   LockEnvironment env;
   for (const auto& p : rdefs) {
     env.set(p.second, LockDepths(0));
@@ -509,21 +530,30 @@ struct AnalysisResult {
 
 AnalysisResult analyze(ControlFlowGraph& cfg) {
   AnalysisResult ret;
-  ret.method_with_locks = true;
   // 2) Run ReachingDefs.
-  auto rdefs_opt = analysis::compute_rdefs(cfg);
-  if (!rdefs_opt) {
-    ret.non_singleton_rdefs = true;
+  auto rdefs_res = analysis::compute_rdefs(cfg);
+  if (!rdefs_res) {
+    if (rdefs_res.failure) {
+      ret.method_with_locks = true;
+      ret.non_singleton_rdefs = true;
+    }
     return ret;
   }
 
-  ret.rdefs = std::move(*rdefs_opt);
+  ret.method_with_locks = true;
+  ret.rdefs = std::move(rdefs_res.rdefs);
+  // Possible with unreachable code.
+  if (ret.rdefs.empty()) {
+    ret.method_with_locks = false;
+    return ret;
+  }
 
   // 3) Run our iterator.
   ret.iter = std::make_unique<analysis::LocksIterator>(cfg, ret.rdefs);
   size_t sources_count;
   {
     auto env = analysis::create_start(ret.rdefs);
+    redex_assert(env.is_value());
     sources_count = env.bindings().size();
     ret.iter->run(env);
   }
@@ -689,6 +719,9 @@ Stats run_locks_removal(DexMethod* m, IRCode* code) {
     stats.methods_with_issues.insert(m);
     return stats;
   }
+  if (!analysis.method_with_locks) {
+    return stats;
+  }
 
   stats.counts[analysis.max_d].insert(m);
   stats.counts_per[analysis.max_same].insert(m);
@@ -739,7 +772,7 @@ void run_impl(DexStoresVector& stores,
                 << " = " << stat << std::endl;
     }
   };
-  auto prof = conf.get_method_profiles();
+  const auto& prof = conf.get_method_profiles();
   if (!prof.has_stats()) {
     TRACE(LOCKS, 2, "No profiles available!");
   }

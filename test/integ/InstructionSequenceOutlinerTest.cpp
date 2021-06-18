@@ -5,8 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <boost/thread/once.hpp>
 #include <gtest/gtest.h>
 #include <json/json.h>
+#include <unordered_set>
 
 #include "ControlFlow.h"
 #include "DexInstruction.h"
@@ -16,6 +18,8 @@
 #include "ScopedCFG.h"
 
 #include "InstructionSequenceOutliner.h"
+#include "RedexContext.h"
+#include "Trace.h"
 
 DexMethodRef* find_invoked_method(const cfg::ControlFlowGraph& cfg,
                                   const std::string& name) {
@@ -45,8 +49,25 @@ size_t count_invokes(const cfg::ControlFlowGraph& cfg,
   return count_invokes(cfg, find_invoked_method(cfg, name));
 }
 
+void get_positions(std::unordered_set<DexPosition*>& positions,
+                   cfg::ControlFlowGraph& cfg) {
+  auto manager = g_redex->get_position_pattern_switch_manager();
+  for (auto block : cfg.blocks()) {
+    for (auto it = block->begin(); it != block->end(); it++) {
+      if (it->type == MFLOW_POSITION) {
+        auto position = it->pos.get();
+        if (manager->is_pattern_position(position) ||
+            manager->is_switch_position(position)) {
+          positions.insert(position);
+        }
+      }
+    }
+  }
+}
+
 class InstructionSequenceOutlinerTest : public RedexIntegrationTest {
  public:
+  boost::optional<DexClasses&> classes;
   InstructionSequenceOutlinerTest() {
     auto config_file_env = std::getenv("config_file");
     always_assert_log(config_file_env,
@@ -54,10 +75,23 @@ class InstructionSequenceOutlinerTest : public RedexIntegrationTest {
 
     std::ifstream config_file(config_file_env, std::ifstream::binary);
     config_file >> m_cfg;
+    // use a local copy of classes always pointing
+    // to the first dex. It keeps the
+    // existing test consistent when introduces
+    // the secondary dex.
+    classes = stores.back().get_dexen().front();
   }
 
   void run_passes(const std::vector<Pass*>& passes) {
     RedexIntegrationTest::run_passes(passes, nullptr, m_cfg);
+  }
+
+  void SetUp() override {
+    reset_ab_experiments_global_state();
+
+    std::unordered_map<std::string, std::string> states;
+    states["outliner_v1"] = "test";
+    ab_test::ABExperimentContext::parse_experiments_states(states, false);
   }
 
  private:
@@ -65,7 +99,6 @@ class InstructionSequenceOutlinerTest : public RedexIntegrationTest {
 };
 
 TEST_F(InstructionSequenceOutlinerTest, basic) {
-  force_experiments_test_mode();
   // Testing basic outlining, regardless of whether the outlined instruction
   // sequence is surrounded by some distractions
   std::vector<DexMethodRef*> println_methods;
@@ -119,7 +152,6 @@ TEST_F(InstructionSequenceOutlinerTest, basic) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, twice) {
-  force_experiments_test_mode();
   // Testing that there can be multiple outlined locations within a method.
   std::vector<DexMethod*> twice_methods;
   DexMethodRef* println_method = nullptr;
@@ -151,7 +183,6 @@ TEST_F(InstructionSequenceOutlinerTest, twice) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, in_try) {
-  force_experiments_test_mode();
   // Testing that we can outlined across a big block (consisting of several
   // individual blocks) surrounded by a try-catch.
   std::vector<DexMethod*> in_try_methods;
@@ -177,16 +208,10 @@ TEST_F(InstructionSequenceOutlinerTest, in_try) {
 
   for (auto m : in_try_methods) {
     cfg::ScopedCFG scoped_cfg(m->get_code());
-    // TODO(T79690286): Change the number of expected println methods to 0 once
-    // we outline from methods with exceptions again
-    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 5);
+    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 0);
     auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
-    // TODO(T79690286): Change to EXPECT_NE once we outline from methods with
-    // exceptions again
-    EXPECT_EQ(outlined_method, nullptr);
-    // TODO(T79690286): Change the number of outlined methods to 1 once we
-    // outline from methods with exceptions again
-    EXPECT_EQ(count_invokes(*scoped_cfg, outlined_method), 0);
+    EXPECT_NE(outlined_method, nullptr);
+    EXPECT_EQ(count_invokes(*scoped_cfg, outlined_method), 1);
   }
 }
 
@@ -363,8 +388,8 @@ TEST_F(InstructionSequenceOutlinerTest, defined_reg_escapes_to_catch) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, big_block_can_end_with_no_tries) {
-  // Test that a sequence becomes beneficial to outline because a big block can
-  // have throwing code followed by non-throwing code.
+  // Test that a sequence becomes beneficial to outline because a big block
+  // can have throwing code followed by non-throwing code.
   std::vector<DexMethod*> big_block_can_end_with_no_tries_methods;
   DexMethodRef* println_method;
   for (const auto& cls : *classes) {
@@ -389,11 +414,9 @@ TEST_F(InstructionSequenceOutlinerTest, big_block_can_end_with_no_tries) {
   for (auto m : big_block_can_end_with_no_tries_methods) {
     cfg::ScopedCFG scoped_cfg(m->get_code());
     auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
-    // TODO(T82892854): Change to NE when fixing bug with D24905219 backed out
-    EXPECT_EQ(outlined_method, nullptr);
+    EXPECT_NE(outlined_method, nullptr);
     auto println_method_invokes = count_invokes(*scoped_cfg, println_method);
-    // TODO(T82892854): Change to EQ when fixing bug with D24905219 backed out
-    EXPECT_NE(println_method_invokes, 0);
+    EXPECT_EQ(println_method_invokes, 1);
   }
 }
 
@@ -846,7 +869,6 @@ TEST_F(InstructionSequenceOutlinerTest, cfg_with_object_arg) {
 }
 
 TEST_F(InstructionSequenceOutlinerTest, distributed) {
-  force_experiments_test_mode();
   // When outlined sequence occur in unrelated classes, the outlined method
   // it put into a generated helper class
   std::vector<DexMethod*> distributed_methods;
@@ -927,4 +949,172 @@ TEST_F(InstructionSequenceOutlinerTest, colocate_with_refs) {
         m->get_class()->get_name()->str(),
         "Lcom/facebook/redextest/InstructionSequenceOutlinerTest$Nested3;");
   }
+}
+
+TEST_F(InstructionSequenceOutlinerTest, reuse_outlined_methods) {
+  // It tests the reuse of the outlined methods across dexes.
+  // Secondary dex reuses the println methods defined in primary dex.
+  // Supposedly, after the ISO the println should be outlined and the
+  // outlined method resides in the primary dex.
+  std::vector<DexMethodRef*> println_methods;
+  std::vector<DexMethod*> basic_methods;
+  std::vector<DexMethod*> methods_in_secondary_dex;
+
+  for (auto iter_store = stores.rbegin(); iter_store != stores.rend();
+       ++iter_store) {
+    const auto& dex = iter_store->get_dexen();
+    for (const auto& classes : dex) {
+      for (const auto& cls : classes) {
+        for (const auto& m : cls->get_vmethods()) {
+          if (m->get_name()->str().find("basic") != std::string::npos ||
+              m->get_name()->str().find("secondary") != std::string::npos) {
+
+            IRCode* code = m->get_code();
+            cfg::ScopedCFG scoped_cfg(code);
+            auto println_method = find_invoked_method(*scoped_cfg, "println");
+            EXPECT_NE(println_method, nullptr);
+            println_methods.push_back(println_method);
+            EXPECT_EQ(count_invokes(code->cfg(), println_method), 5);
+
+            if (m->get_name()->str().find("basic") != std::string::npos) {
+              // from primary dex
+              basic_methods.push_back(m);
+            } else {
+              // from secondary dex
+              methods_in_secondary_dex.push_back(m);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // check methods before pass run
+  sort_unique(println_methods);
+  EXPECT_EQ(println_methods.size(), 1);
+  auto println_method = println_methods.front();
+  EXPECT_EQ(methods_in_secondary_dex.size(), 2);
+
+  std::vector<Pass*> passes = {
+      new InstructionSequenceOutliner(),
+  };
+  run_passes(passes);
+
+  std::vector<DexMethod*> outlined_methods;
+  // check methods in secondary dex
+  for (auto m : methods_in_secondary_dex) {
+    cfg::ScopedCFG scoped_cfg(m->get_code());
+    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 0);
+    auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
+    EXPECT_NE(outlined_method, nullptr);
+    // The reused outlined method should reside in the primary class
+    EXPECT_EQ(outlined_method->get_class(), basic_methods.front()->get_class());
+    EXPECT_EQ(count_invokes(*scoped_cfg, outlined_method), 1);
+    outlined_methods.push_back(outlined_method->as_def());
+  }
+
+  // check outlined methods
+  sort_unique(outlined_methods);
+  EXPECT_EQ(outlined_methods.size(), 1);
+  for (auto m : outlined_methods) {
+    EXPECT_TRUE(is_static(m));
+    auto proto = m->get_proto();
+    EXPECT_EQ(proto->get_rtype(), type::_void());
+    EXPECT_EQ(proto->get_args()->size(), 0);
+    cfg::ScopedCFG scoped_cfg(m->get_code());
+    EXPECT_EQ(count_invokes(*scoped_cfg, println_method), 5);
+  }
+}
+
+TEST_F(InstructionSequenceOutlinerTest, check_positions) {
+  // It tests that the positions in the outlined method
+  // can be correctly traced back to the callsite positions of the
+  // methods (whick invoke the outlined method) when reuse
+  // the outlined method across the dex.
+  std::vector<DexMethod*> methods;
+  std::set<std::string> method_names{"basic1", "basic2",     "basic3",
+                                     "basic4", "in_try",     "twice1",
+                                     "twice2", "secondary1", "secondary2"};
+  for (auto iter_store = stores.begin(); iter_store != stores.end();
+       ++iter_store) {
+    const auto& dex = iter_store->get_dexen();
+    for (const auto& classes : dex) {
+      for (const auto& cls : classes) {
+        for (const auto& m : cls->get_vmethods()) {
+          if (method_names.count(m->get_name()->str())) {
+            methods.push_back(m);
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<Pass*> passes = {
+      new InstructionSequenceOutliner(),
+  };
+  run_passes(passes);
+
+  std::unordered_set<DexPosition*> switch_positions;
+  std::unordered_set<DexPosition*> pattern_positions;
+  std::vector<DexMethod*> outlined_methods;
+  // get outlined methods
+  for (auto m : methods) {
+    cfg::ScopedCFG scoped_cfg(m->get_code());
+    auto outlined_method = find_invoked_method(*scoped_cfg, "$outline");
+    outlined_methods.push_back(outlined_method->as_def());
+  }
+  // check outlined methods
+  sort_unique(outlined_methods);
+  EXPECT_EQ(outlined_methods.size(), 1);
+  for (auto m : outlined_methods) {
+    auto code = m->get_code();
+    cfg::ScopedCFG scoped_cfg(code);
+    // get switch positions from outlined method
+    get_positions(switch_positions, *scoped_cfg);
+  }
+
+  // pattern id to method map
+  std::unordered_map<uint32_t, std::vector<DexMethod*>>
+      pattern_id_to_method_map;
+  // callsite patterns
+  for (auto m : methods) {
+    auto code = m->get_code();
+    cfg::ScopedCFG scoped_cfg(code);
+    // get pattern positions
+    get_positions(pattern_positions, *scoped_cfg);
+    for (auto pos : pattern_positions) {
+      pattern_id_to_method_map[pos->line].push_back(m);
+    }
+  }
+
+  auto manager = g_redex->get_position_pattern_switch_manager();
+  const auto& switches = manager->get_switches();
+  std::unordered_set<uint32_t> pattern_ids_from_switches;
+
+  EXPECT_GT(switch_positions.size(), 0);
+  // Get pattern ids from switches
+  for (auto sp : switch_positions) {
+    auto s = switches.at(sp->line);
+    for (auto pos_case : s) {
+      pattern_ids_from_switches.insert(pos_case.pattern_id);
+    }
+  }
+
+  EXPECT_GT(pattern_positions.size(), 0);
+  // check callsites pattern ids
+  // should be in the switches
+  for (auto pp : pattern_positions) {
+    auto pattern_id = pp->line;
+    EXPECT_NE(pattern_ids_from_switches.count(pattern_id), 0);
+  }
+
+  // Test the pattern ids from switches
+  // are from two classes (in two dexes).
+  std::unordered_set<std::string> dex_cls_set;
+  for (auto pattern_id : pattern_ids_from_switches) {
+    for (auto m : pattern_id_to_method_map.at(pattern_id)) {
+      dex_cls_set.insert(m->get_class()->get_name()->c_str());
+    }
+  }
+  EXPECT_EQ(dex_cls_set.size(), 2);
 }

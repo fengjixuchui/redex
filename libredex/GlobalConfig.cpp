@@ -10,18 +10,23 @@
 void InlinerConfig::bind_config() {
   bind("true_virtual_inline", true_virtual_inline, true_virtual_inline);
   bind("use_cfg_inliner", use_cfg_inliner, use_cfg_inliner);
+  bind("intermediate_shrinking", intermediate_shrinking,
+       intermediate_shrinking);
   bind("enforce_method_size_limit", enforce_method_size_limit,
        enforce_method_size_limit);
   bind("throws", throws_inline, throws_inline);
+  bind("throw_after_no_return", throw_after_no_return, throw_after_no_return);
   bind("multiple_callers", multiple_callers, multiple_callers);
   bind("inline_small_non_deletables", inline_small_non_deletables,
        inline_small_non_deletables);
-  bind("run_const_prop", run_const_prop, run_const_prop);
-  bind("run_cse", run_cse, run_cse);
-  bind("run_dedup_blocks", run_dedup_blocks, run_dedup_blocks);
-  bind("run_copy_prop", run_copy_prop, run_copy_prop);
-  bind("run_reg_alloc", run_reg_alloc, run_reg_alloc);
-  bind("run_local_dce", run_local_dce, run_local_dce);
+  bind("delete_any_candidate", delete_any_candidate, delete_any_candidate);
+  bind("run_const_prop", shrinker.run_const_prop, shrinker.run_const_prop);
+  bind("run_cse", shrinker.run_cse, shrinker.run_cse);
+  bind("run_dedup_blocks", shrinker.run_dedup_blocks,
+       shrinker.run_dedup_blocks);
+  bind("run_copy_prop", shrinker.run_copy_prop, shrinker.run_copy_prop);
+  bind("run_reg_alloc", shrinker.run_reg_alloc, shrinker.run_reg_alloc);
+  bind("run_local_dce", shrinker.run_local_dce, shrinker.run_local_dce);
   bind("no_inline_annos", {}, m_no_inline_annos);
   bind("force_inline_annos", {}, m_force_inline_annos);
   bind("blocklist", {}, m_blocklist);
@@ -45,10 +50,17 @@ void IRTypeCheckerConfig::bind_config() {
   bind("verify_moves", {}, verify_moves);
   bind("run_after_passes", {}, run_after_passes);
   bind("check_no_overwrite_this", {}, check_no_overwrite_this);
+  bind("check_num_of_refs", {}, check_num_of_refs);
 }
 
 void HasherConfig::bind_config() {
   bind("run_after_each_pass", {}, run_after_each_pass);
+}
+
+void AssessorConfig::bind_config() {
+  bind("run_after_each_pass", run_after_each_pass, run_after_each_pass);
+  bind("run_initially", run_initially, run_initially);
+  bind("run_finally", run_finally, run_finally);
 }
 
 void CheckUniqueDeobfuscatedNamesConfig::bind_config() {
@@ -60,6 +72,7 @@ void CheckUniqueDeobfuscatedNamesConfig::bind_config() {
 void GlobalConfig::bind_config() {
   bool bool_param;
   std::string string_param;
+  std::unordered_map<std::string, std::string> string_map_param;
   std::vector<std::string> string_vector_param;
   uint32_t uint32_param;
   // Sorted alphabetically
@@ -85,8 +98,9 @@ void GlobalConfig::bind_config() {
   bind("default_coldstart_classes", "", string_param);
   bind("emit_class_method_info_map", false, bool_param);
   bind("emit_locator_strings", {}, bool_param);
-  bind("enable_ab_experiments", false, bool_param);
-  bind("force_ab_exp_test_mode", false, bool_param);
+  bind("iodi_disable_min_sdk_opt", false, bool_param);
+  bind("symbolicate_detached_methods", false, bool_param);
+  bind("ab_experiments_states", {}, string_map_param);
   bind("force_single_dex", false, bool_param);
   bind("instruction_size_bitwidth_limit", 0u, uint32_param);
   bind("json_serde_supercls", {}, string_vector_param);
@@ -126,6 +140,7 @@ GlobalConfigRegistry& GlobalConfig::default_registry() {
       register_as<InlinerConfig>("inliner"),
       register_as<IRTypeCheckerConfig>("ir_type_checker"),
       register_as<HasherConfig>("hasher"),
+      register_as<AssessorConfig>("assessor"),
       register_as<CheckUniqueDeobfuscatedNamesConfig>(
           "check_unique_deobfuscated_names"),
       register_as<OptDecisionsConfig>("opt_decisions"),

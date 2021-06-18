@@ -15,7 +15,9 @@
 #include <utility>
 #include <vector>
 
+#include "DexPosition.h"
 #include "IRCode.h"
+#include "WeakTopologicalOrdering.h"
 
 /**
  * A Control Flow Graph is a directed graph of Basic Blocks.
@@ -320,6 +322,9 @@ class Block final {
   // return an iterator to the first non-param-loading MFLOW_OPCODE, or end() if
   // there are none.
   IRList::iterator get_first_non_param_loading_insn();
+  // return an iterator to the first instruction (except move-result* and goto)
+  // if it occurs before the first position, or end() if there are none.
+  IRList::iterator get_first_insn_before_position();
 
   // including move-result-pseudo
   bool starts_with_move_result();
@@ -426,6 +431,15 @@ struct DominatorInfo {
   size_t postorder;
 };
 
+using BlockChain = std::vector<Block*>;
+
+struct LinearizationStrategy {
+  virtual ~LinearizationStrategy() {}
+  virtual std::vector<Block*> order(
+      cfg::ControlFlowGraph& cfg,
+      sparta::WeakTopologicalOrdering<BlockChain*> wto) = 0;
+};
+
 class ControlFlowGraph {
 
  public:
@@ -443,8 +457,10 @@ class ControlFlowGraph {
 
   /*
    * convert from the graph representation to a list of MethodItemEntries
+   * Using custom_strategy allows custom order linearization of the CFG.
    */
-  IRList* linearize();
+  IRList* linearize(
+      const std::unique_ptr<LinearizationStrategy>& custom_strategy = nullptr);
 
   // Return the blocks of this CFG in an arbitrary order.
   //
@@ -642,6 +658,23 @@ class ControlFlowGraph {
   // edges.
   void remove_insn(const InstructionIterator& it);
 
+  void insert_before(const InstructionIterator& it,
+                     std::unique_ptr<DexPosition> pos);
+  void insert_after(const InstructionIterator& it,
+                    std::unique_ptr<DexPosition> pos);
+
+  void insert_before(Block* block,
+                     const IRList::iterator& it,
+                     std::unique_ptr<DexPosition> pos);
+  void insert_after(Block* block,
+                    const IRList::iterator& it,
+                    std::unique_ptr<DexPosition> pos);
+
+  void insert_before(const InstructionIterator& it,
+                     std::unique_ptr<SourceBlock> sb);
+  void insert_after(const InstructionIterator& it,
+                    std::unique_ptr<SourceBlock> sb);
+
   // Insertion Methods (insert_before/after and push_front/back):
   //  * These methods add instructions to the CFG
   //  * They do not add branch (if-*, switch-*) instructions to the cfg (use
@@ -734,12 +767,32 @@ class ControlFlowGraph {
       Block* goto_block,
       const std::vector<std::pair<int32_t, Block*>>& case_to_block);
 
+  // delete old blocks and reroute its predecessors to new blocks
+  // Returns number of removed instructions.
+  uint32_t replace_blocks(
+      const std::vector<std::pair<Block*, Block*>>& old_new_blocks);
+
   // delete old_block and reroute its predecessors to new_block
-  void replace_block(Block* old_block, Block* new_block);
+  // Note that replacing blocks is relatively expensive as it scans and fixes up
+  // dangling parent positions in all other blocks; consider calling
+  // remove_blocks to remove multiple blocks at once.
+  // Returns number of removed instructions.
+  uint32_t replace_block(Block* old_block, Block* new_block) {
+    return replace_blocks({{old_block, new_block}});
+  }
+
+  // Remove blocks from the graph and release associated memory.
+  // Remove all incoming and outgoing edges.
+  // Returns number of removed instructions.
+  uint32_t remove_blocks(const std::vector<Block*>& blocks);
 
   // Remove this block from the graph and release associated memory.
   // Remove all incoming and outgoing edges.
-  void remove_block(Block* block);
+  // Note that removing blocks is relatively expensive as it scans and fixes up
+  // dangling parent positions in all other blocks; consider calling
+  // remove_blocks to remove multiple blocks at once.
+  // Returns number of removed instructions.
+  uint32_t remove_block(Block* block) { return remove_blocks({block}); }
 
   /*
    * Print the graph in the DOT graph description language.
@@ -750,6 +803,7 @@ class ControlFlowGraph {
   bool editable() const { return m_editable; }
 
   size_t num_blocks() const { return m_blocks.size(); }
+  size_t num_edges() const { return m_edges.size(); }
 
   /*
    * Traverse the graph, starting from the entry node. Return a bitset with IDs
@@ -758,9 +812,13 @@ class ControlFlowGraph {
    */
   boost::dynamic_bitset<> visit() const;
 
+  cfg::Block* get_block(BlockId id) const { return m_blocks.at(id); }
+
   // remove blocks with no predecessors
-  // returns the number of instructions removed
-  uint32_t remove_unreachable_blocks();
+  // returns pair of 1) the number of instructions removed, and 2) whether an
+  // instruction with the destination of the last register was removed, and thus
+  // a call to recompute_registers_size might be beneficial.
+  std::pair<uint32_t, bool> remove_unreachable_blocks();
 
   // transform the CFG to an equivalent but more canonical state
   // Assumes m_editable is true
@@ -823,12 +881,15 @@ class ControlFlowGraph {
                                      Block* hint = nullptr) const;
 
   // choose an order of blocks for output
-  std::vector<Block*> order();
+  std::vector<Block*> order(
+      const std::unique_ptr<LinearizationStrategy>& custom_strategy = nullptr);
 
   /*
    * Find the first debug position preceding an instruction
    */
   DexPosition* get_dbg_pos(const cfg::InstructionIterator& it);
+
+  std::size_t opcode_hash() const;
 
  private:
   using BranchToTargets =
@@ -868,11 +929,12 @@ class ControlFlowGraph {
   void remove_try_catch_markers();
 
   // helper functions
-  using Chain = std::vector<Block*>;
-  void build_chains(std::vector<std::unique_ptr<Chain>>* chains,
-                    std::unordered_map<Block*, Chain*>* block_to_chain);
+  void build_chains(std::vector<std::unique_ptr<BlockChain>>* chains,
+                    std::unordered_map<Block*, BlockChain*>* block_to_chain);
+  sparta::WeakTopologicalOrdering<BlockChain*> build_wto(
+      const std::unordered_map<Block*, BlockChain*>& block_to_chain);
   std::vector<Block*> wto_chains(
-      const std::unordered_map<Block*, Chain*>& block_to_chain);
+      sparta::WeakTopologicalOrdering<BlockChain*> wto);
 
   // Materialize target instructions and gotos corresponding to control-flow
   // edges. Used while turning back into a linear representation.
@@ -905,9 +967,10 @@ class ControlFlowGraph {
   // remove blocks with no entries
   void remove_empty_blocks();
 
-  // remove any parent pointer that was passed in as an arg (e.g. for when
-  // you delete the supplied positions)
-  void remove_dangling_parents(const std::unordered_set<DexPosition*>&);
+  // Re-insert any parent pointer that got deleted. This is a useful
+  // method to invoke just after removing positions to avoid leaving
+  // behind dangling parents.
+  void fix_dangling_parents(std::vector<std::unique_ptr<DexPosition>>);
 
   // Assert if there are edges that are never a predecessor or successor of a
   // block
@@ -1187,6 +1250,9 @@ class InstructionIteratorImpl {
   InstructionIteratorImpl(const InstructionIteratorImpl<false>& rhs)
       : m_cfg(rhs.m_cfg), m_block(rhs.m_block), m_it(rhs.m_it) {}
 
+  InstructionIteratorImpl& operator=(const InstructionIteratorImpl& other) =
+      default;
+
   InstructionIteratorImpl<is_const>& operator++() {
     assert_not_end();
     ++m_it;
@@ -1287,12 +1353,18 @@ class InstructionIterableImpl {
   InstructionIteratorImpl<is_const> begin() {
     return InstructionIteratorImpl<is_const>(m_cfg, true);
   }
+  InstructionIteratorImpl<true> begin() const {
+    return InstructionIteratorImpl<true>(m_cfg, true);
+  }
 
   InstructionIteratorImpl<is_const> end() {
     return InstructionIteratorImpl<is_const>(m_cfg, false);
   }
+  InstructionIteratorImpl<true> end() const {
+    return InstructionIteratorImpl<true>(m_cfg, false);
+  }
 
-  bool empty() { return begin() == end(); }
+  bool empty() const { return begin() == end(); }
 };
 
 template <class ForwardIt>
@@ -1350,7 +1422,7 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
         always_assert_log(!opcode::is_branch(existing_last_op) &&
                               !opcode::is_throw(existing_last_op) &&
                               !opcode::is_a_return(existing_last_op),
-                          "Can't add instructions after %s in Block %d in %s",
+                          "Can't add instructions after %s in Block %zu in %s",
                           details::show_insn(existing_last->insn).c_str(),
                           b->id(), details::show_cfg(*this).c_str());
 
@@ -1360,7 +1432,7 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
         if (!throws.empty()) {
           always_assert_log(!existing_last->insn->has_move_result_any(),
                             "Can't add instructions after throwing instruction "
-                            "%s with move-result in Block %d in %s",
+                            "%s with move-result in Block %zu in %s",
                             details::show_insn(existing_last->insn).c_str(),
                             b->id(), details::show_cfg(*this).c_str());
           Block* new_block = create_block();
@@ -1386,15 +1458,15 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
       // Stop adding instructions when we understand that op
       // is the end of the block.
       insns_it = std::prev(end_index);
-      std::unordered_set<DexPosition*> dangling;
+      std::vector<std::unique_ptr<DexPosition>> dangling;
       for (auto it = pos; it != b->m_entries.end();) {
         if (it->type == MFLOW_POSITION) {
-          dangling.insert(it->pos.get());
+          dangling.push_back(std::move(it->pos));
         }
         it = b->m_entries.erase_and_dispose(it);
         invalidated_its = true;
       }
-      remove_dangling_parents(dangling);
+      fix_dangling_parents(std::move(dangling));
 
       if (opcode::is_a_return(op)) {
         // This block now ends in a return, it must have no successors.

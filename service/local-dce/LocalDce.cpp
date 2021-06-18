@@ -20,6 +20,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "MethodOverrideGraph.h"
+#include "NullPointerExceptionUtil.h"
 #include "Purity.h"
 #include "ReachingDefinitions.h"
 #include "Resolver.h"
@@ -70,18 +71,20 @@ void update_liveness(const IRInstruction* inst,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
-  normalize_new_instances(cfg);
-  const auto& blocks = graph::postorder_sort<cfg::GraphInterface>(cfg);
+std::vector<std::pair<cfg::Block*, IRList::iterator>>
+LocalDce::get_dead_instructions(
+    const cfg::ControlFlowGraph& cfg,
+    const std::vector<cfg::Block*>& blocks,
+    const std::function<const std::vector<cfg::Edge*>&(cfg::Block*)>& succs_fn,
+    const std::function<bool(cfg::Block*, IRInstruction*)>&
+        may_be_required_fn) {
   auto regs = cfg.get_registers_size();
   std::unordered_map<cfg::BlockId, boost::dynamic_bitset<>> liveness;
-  for (cfg::Block* b : blocks) {
+  for (cfg::Block* b : cfg.blocks()) {
     liveness.emplace(b->id(), boost::dynamic_bitset<>(regs + 1));
   }
   bool changed;
   std::vector<std::pair<cfg::Block*, IRList::iterator>> dead_instructions;
-
-  TRACE(DCE, 5, "%s", SHOW(cfg));
 
   // Iterate liveness analysis to a fixed point.
   do {
@@ -94,7 +97,7 @@ void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
       TRACE(DCE, 5, "B%lu: %s", b->id(), show(bliveness).c_str());
 
       // Compute live-out for this block from its successors.
-      for (auto& s : b->succs()) {
+      for (auto& s : succs_fn(b)) {
         if (s->target()->id() == b->id()) {
           bliveness |= prev_liveness;
         }
@@ -112,7 +115,8 @@ void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
         if (it->type != MFLOW_OPCODE) {
           continue;
         }
-        bool required = is_required(cfg, b, it->insn, bliveness);
+        bool required = may_be_required_fn(b, it->insn) &&
+                        is_required(cfg, b, it->insn, bliveness);
         if (required) {
           update_liveness(it->insn, bliveness);
         } else {
@@ -131,6 +135,21 @@ void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
       }
     }
   } while (changed);
+  return dead_instructions;
+}
+
+void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
+  normalize_new_instances(cfg);
+  TRACE(DCE, 5, "%s", SHOW(cfg));
+  const auto& blocks = graph::postorder_sort<cfg::GraphInterface>(cfg);
+  std::vector<std::pair<cfg::Block*, IRList::iterator>> dead_instructions =
+      get_dead_instructions(
+          cfg, blocks, /* succs_fn */
+          [](cfg::Block* block) -> const std::vector<cfg::Edge*>& {
+            return block->succs();
+          },
+          /* may_be_required_fn */
+          [](cfg::Block*, IRInstruction*) -> bool { return true; });
 
   // Remove dead instructions.
   std::unordered_set<IRInstruction*> seen;
@@ -154,29 +173,23 @@ void LocalDce::dce(cfg::ControlFlowGraph& cfg) {
       npe_instructions.emplace_back(insn, b);
     } else {
       TRACE(DCE, 2, "DEAD: %s", SHOW(insn));
-      seen.emplace(insn);
       b->remove_insn(it);
     }
   }
   if (!npe_instructions.empty()) {
-    auto null_reg = cfg.allocate_temp();
+    npe::NullPointerExceptionCreator npe_creator(&cfg);
     for (auto pair : npe_instructions) {
-      auto it = cfg.find_insn(pair.first, pair.second);
+      auto invoke_insn = pair.first;
+      auto block = pair.second;
+      auto it = cfg.find_insn(invoke_insn, block);
       if (it.is_end()) {
-        // can happen if we replaced an earlier invocation with throw null.
+        // can happen if we removed an earlier invocation.
         continue;
       }
-      std::vector<IRInstruction*> insns;
-      auto const_insn = new IRInstruction(OPCODE_CONST);
-      const_insn->set_dest(null_reg)->set_literal(0);
-      insns.push_back(const_insn);
-      auto throw_insn = new IRInstruction(OPCODE_THROW);
-      throw_insn->set_src(0, null_reg);
-      insns.push_back(throw_insn);
-      cfg.replace_insns(it, insns);
+      cfg.replace_insns(it, npe_creator.get_insns(invoke_insn));
     }
   }
-  auto unreachable_insn_count = cfg.remove_unreachable_blocks();
+  auto unreachable_insn_count = cfg.remove_unreachable_blocks().first;
   cfg.recompute_registers_size();
 
   m_stats.npe_instruction_count += npe_instructions.size();
@@ -196,7 +209,7 @@ void LocalDce::dce(IRCode* code) {
  * An instruction is required (i.e., live) if it has side effects or if its
  * destination register is live.
  */
-bool LocalDce::is_required(cfg::ControlFlowGraph& cfg,
+bool LocalDce::is_required(const cfg::ControlFlowGraph& cfg,
                            cfg::Block* b,
                            IRInstruction* inst,
                            const boost::dynamic_bitset<>& bliveness) {

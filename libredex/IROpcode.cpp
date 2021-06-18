@@ -14,6 +14,11 @@
 #include "DexUtil.h"
 #include "Show.h"
 
+std::ostream& operator<<(std::ostream& os, const IROpcode& op) {
+  os << show(op);
+  return os;
+}
+
 namespace opcode {
 
 // clang-format off
@@ -1182,6 +1187,12 @@ IROpcode load_opcode(const DexType* type) {
   return type::is_wide_type(type) ? IOPCODE_LOAD_PARAM_WIDE
          : type::is_object(type)  ? IOPCODE_LOAD_PARAM_OBJECT
                                   : IOPCODE_LOAD_PARAM;
+}
+
+IROpcode move_opcode(const DexType* type) {
+  return type::is_wide_type(type) ? OPCODE_MOVE_WIDE
+         : type::is_object(type)  ? OPCODE_MOVE_OBJECT
+                                  : OPCODE_MOVE;
 }
 
 IROpcode move_result_to_move(IROpcode op) {

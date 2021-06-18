@@ -8,8 +8,11 @@
 #pragma once
 
 #include <boost/intrusive/list.hpp>
+#include <boost/optional.hpp>
 #include <boost/range/sub_range.hpp>
 #include <functional>
+#include <iosfwd>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -114,19 +117,84 @@ struct BranchTarget {
  */
 struct SourceBlock {
   DexMethodRef* src{nullptr};
+  std::unique_ptr<SourceBlock> next;
   // Large methods exist, but a 32-bit integer is safe.
   uint32_t id{0};
-  // Use float over double to have a struct without padding. Additional
-  // precision is unnecessary.
-  float val{0};
+  // Float has enough precision.
+  class Val {
+    static constexpr float kNoneVal = std::numeric_limits<float>::quiet_NaN();
+
+   public:
+    constexpr Val(float v, float a) noexcept : m_val({v, a}) {}
+
+    static constexpr Val none() { return Val(kNoneVal, kNoneVal); }
+
+    // NOLINTNEXTLINE
+    /* implicit */ operator bool() const { return m_val.val == m_val.val; };
+
+    bool operator==(const Val& other) const {
+      return (m_val.val == other.m_val.val &&
+              m_val.appear100 == other.m_val.appear100) ||
+             (m_val.val != m_val.val && other.m_val.val != other.m_val.val);
+    }
+
+    // To access like an `optional`.
+
+    struct ValPair {
+      float val;
+      float appear100;
+    };
+
+    ValPair& operator*() {
+      redex_assert(operator bool());
+      return m_val;
+    }
+    const ValPair& operator*() const {
+      redex_assert(operator bool());
+      return m_val;
+    }
+
+    ValPair* operator->() {
+      redex_assert(operator bool());
+      return &m_val;
+    }
+    const ValPair* operator->() const {
+      redex_assert(operator bool());
+      return &m_val;
+    }
+
+   private:
+    ValPair m_val;
+  };
+  std::vector<Val> vals;
 
   SourceBlock() = default;
-  SourceBlock(DexMethodRef* src, size_t id, float v)
-      : src(src), id(id), val(v) {}
-  SourceBlock(const SourceBlock&) = default;
+  SourceBlock(DexMethodRef* src, size_t id) : src(src), id(id) {}
+  SourceBlock(DexMethodRef* src, size_t id, std::vector<Val> v)
+      : src(src), id(id), vals(std::move(v)) {}
+  SourceBlock(const SourceBlock& other)
+      : src(other.src),
+        next(other.next == nullptr ? nullptr : new SourceBlock(*other.next)),
+        id(other.id),
+        vals(other.vals) {}
+
+  boost::optional<float> get_val(size_t i) const {
+    return vals[i] ? boost::optional<float>(vals[i]->val) : boost::none;
+  }
+  boost::optional<float> get_appear100(size_t i) const {
+    return vals[i] ? boost::optional<float>(vals[i]->appear100) : boost::none;
+  }
 
   bool operator==(const SourceBlock& other) const {
-    return src == other.src && id == other.id && val == other.val;
+    return src == other.src && id == other.id && vals == other.vals;
+  }
+
+  void append(std::unique_ptr<SourceBlock> sb) {
+    SourceBlock* last = this;
+    while (last->next != nullptr) {
+      last = last->next.get();
+    }
+    last->next = std::move(sb);
   }
 };
 
@@ -165,6 +233,8 @@ enum MethodItemType {
   // A no-op
   MFLOW_FALLTHROUGH,
 };
+
+std::ostream& operator<<(std::ostream&, const MethodItemType& type);
 
 struct MethodItemEntry {
   boost::intrusive::list_member_hook<> list_hook_;
@@ -505,6 +575,9 @@ class InstructionIteratorImpl {
 
   InstructionIteratorImpl(const InstructionIteratorImpl<false>& rhs)
       : m_it(rhs.m_it), m_end(rhs.m_end) {}
+
+  InstructionIteratorImpl& operator=(const InstructionIteratorImpl& other) =
+      default;
 
   InstructionIteratorImpl& operator++() {
     ++m_it;

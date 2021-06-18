@@ -87,7 +87,7 @@ DexMethod* generate_dispatch(const DexType* base_type,
   auto dispatch_name =
       dispatch::gen_dispatch_name(dispatch_owner, new_proto, orig_name);
 
-  TRACE(RM_INTF, 9, "generating dispatch %s.%s for targets of size %d",
+  TRACE(RM_INTF, 9, "generating dispatch %s.%s for targets of size %zu",
         SHOW(dispatch_owner), dispatch_name->c_str(), targets.size());
   auto anno_set = get_anno_set(dispatch_anno);
   auto mc =
@@ -286,7 +286,7 @@ size_t exclude_unremovables(const Scope& scope,
   for (auto intf : intf_list) {
     const auto& impls = type_system.get_implementors(intf);
     if (impls.size() <= 1) {
-      TRACE(RM_INTF, 5, "Excluding %s with impls of size %d", SHOW(intf),
+      TRACE(RM_INTF, 5, "Excluding %s with impls of size %zu", SHOW(intf),
             impls.size());
       candidates.erase(intf);
       count++;
@@ -351,7 +351,7 @@ size_t exclude_unremovables(const Scope& scope,
 DexMethod* find_matching_virtual_method(const TypeSystem& type_system,
                                         const DexType* owner,
                                         const VirtualScope* scope) {
-  for (const auto vmeth : scope->methods) {
+  for (const auto& vmeth : scope->methods) {
     auto method = vmeth.first;
     if (!method->is_def() || !is_public(method)) {
       continue;
@@ -393,9 +393,11 @@ MethodOrderedSet find_dispatch_targets(const TypeSystem& type_system,
       implementors.erase(impl);
     }
   }
-
-  // All implementor types should've been matched by now.
-  always_assert(implementors.empty());
+  // If not all implementors are matched, return an empty dispatch set; the
+  // caller will bail on the current interface.
+  if (!implementors.empty()) {
+    return MethodOrderedSet();
+  }
   return targets;
 }
 
@@ -416,7 +418,7 @@ void include_parent_interfaces(const DexType* root, TypeSet& interfaces) {
   }
   size_t size_before = interfaces.size();
   interfaces.insert(parent_interfaces.begin(), parent_interfaces.end());
-  TRACE(RM_INTF, 5, "Found parent interfaces %d",
+  TRACE(RM_INTF, 5, "Found parent interfaces %zu",
         interfaces.size() - size_before);
 }
 
@@ -465,6 +467,9 @@ TypeSet RemoveInterfacePass::remove_leaf_interfaces(
   std::unordered_map<DexMethod*, DexMethod*> intf_meth_to_dispatch;
   for (const auto intf : leaf_interfaces) {
     TRACE(RM_INTF, 5, "Found leaf interface %s", SHOW(intf));
+    std::unordered_map<DexMethod*, DexMethod*> local_intf_meth_to_dispatch;
+    std::unordered_map<size_t, size_t> local_dispatch_stats;
+
     const auto& implementors = type_system.get_implementors(intf);
     auto intf_methods = type_class(intf)->get_vmethods();
     for (const auto meth : intf_methods) {
@@ -472,15 +477,30 @@ TypeSet RemoveInterfacePass::remove_leaf_interfaces(
       auto intf_scope = type_system.find_interface_scope(meth);
       MethodOrderedSet found_targets =
           find_dispatch_targets(type_system, intf_scope, implementors);
+      if (found_targets.empty()) {
+        TRACE(RM_INTF, 5, "Incomplete dispatch targets; abort on %s",
+              SHOW(intf));
+        local_dispatch_stats.clear();
+        local_intf_meth_to_dispatch.clear();
+        break;
+      }
+
       std::vector<DexMethod*> dispatch_targets(found_targets.begin(),
                                                found_targets.end());
       auto replacement_type = get_replacement_type(type_system, intf, root);
       auto dispatch =
           generate_dispatch(replacement_type, dispatch_targets, meth,
                             m_keep_debug_info, m_interface_dispatch_anno);
-      m_dispatch_stats[dispatch_targets.size()]++;
-      intf_meth_to_dispatch[meth] = dispatch;
+      local_dispatch_stats[dispatch_targets.size()]++;
+      local_intf_meth_to_dispatch[meth] = dispatch;
     }
+
+    // Merge stats
+    for (const auto& pair : local_dispatch_stats) {
+      m_dispatch_stats[pair.first] += pair.second;
+    }
+    intf_meth_to_dispatch.insert(local_intf_meth_to_dispatch.begin(),
+                                 local_intf_meth_to_dispatch.end());
   }
   update_interface_calls(scope, intf_meth_to_dispatch);
   remove_inheritance(scope, type_system, leaf_interfaces);

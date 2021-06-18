@@ -9,6 +9,7 @@ import distutils.version
 import fnmatch
 import glob
 import json
+import logging
 import mmap
 import os
 import re
@@ -17,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from os.path import basename, isfile, join
+from os.path import basename, dirname, isfile, join
 
 import pyredex.unpacker
 from pyredex.logger import log
@@ -37,7 +38,7 @@ def abs_glob(directory, pattern="*"):
 
 
 def make_temp_dir(name="", debug=False):
-    """ Make a temporary directory which will be automatically deleted """
+    """Make a temporary directory which will be automatically deleted"""
     global temp_dirs
     directory = tempfile.mkdtemp(name)
     if not debug:
@@ -65,18 +66,44 @@ def _find_biggest_build_tools_version(base):
     VERSION_REGEXP = r"\d+\.\d+\.\d+$"
     build_tools = join(base, "build-tools")
     version = max(
-        (d for d in os.listdir(build_tools) if re.match(VERSION_REGEXP, d)),
+        (
+            "0.0.1",
+            *[d for d in os.listdir(build_tools) if re.match(VERSION_REGEXP, d)],
+        ),
         key=distutils.version.StrictVersion,
     )
+    if version == "0.0.1":
+        return None
     return join(build_tools, version)
 
 
-def find_android_build_tools_by_env():
-    if "ANDROID_SDK" in os.environ:
-        return _find_biggest_build_tools_version(os.environ["ANDROID_SDK"])
-    if "ANDROID_HOME" in os.environ:
-        return _find_biggest_build_tools_version(os.environ["ANDROID_HOME"])
+def _filter_none_not_exists_ret_none(input):
+    if input is None:
+        return None
+    filtered = [p for p in input if p and os.path.exists(p)]
+    if filtered:
+        return filtered
     return None
+
+
+def find_android_path_by_env():
+    return _filter_none_not_exists_ret_none(
+        [
+            os.environ[key]
+            for key in ["ANDROID_SDK", "ANDROID_HOME"]
+            if key in os.environ
+        ]
+    )
+
+
+def find_android_build_tools_by_env():
+    base = find_android_path_by_env()
+    if not base:
+        return None
+
+    return _filter_none_not_exists_ret_none(
+        [_find_biggest_build_tools_version(p) for p in base]
+    )
 
 
 # If the script isn't run in a directory that buck recognizes, set this
@@ -84,22 +111,35 @@ def find_android_build_tools_by_env():
 root_dir_for_buck = None
 
 
-def find_android_build_tools_by_buck():
-    def load_android_buckconfig_values():
-        cmd = ["buck", "audit", "config", "android", "--json"]
-        global root_dir_for_buck
-        cwd = root_dir_for_buck if root_dir_for_buck is not None else os.getcwd()
-        # Set NO_BUCKD to minimize disruption to any currently running buckd
-        env = dict(os.environ)
-        env["NO_BUCKD"] = "1"
-        raw = subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.DEVNULL, env=env)
-        return json.loads(raw)
+def _load_android_buckconfig_values():
+    cmd = ["buck", "audit", "config", "android", "--json"]
+    global root_dir_for_buck
+    cwd = root_dir_for_buck if root_dir_for_buck is not None else os.getcwd()
+    # Set NO_BUCKD to minimize disruption to any currently running buckd
+    env = dict(os.environ)
+    env["NO_BUCKD"] = "1"
+    raw = subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.DEVNULL, env=env)
+    return json.loads(raw)
 
-    log("Computing SDK path from buck")
+
+def find_android_path_by_buck():
+    logging.debug("Computing SDK path from buck")
     try:
-        buckconfig = load_android_buckconfig_values()
+        buckconfig = _load_android_buckconfig_values()
     except BaseException as e:
-        log("Failed loading buckconfig: %s" % e)
+        logging.debug("Failed loading buckconfig: %s", e)
+        return None
+    if "android.sdk_path" not in buckconfig:
+        return None
+    return _filter_none_not_exists_ret_none([buckconfig.get("android.sdk_path")])
+
+
+def find_android_build_tools_by_buck():
+    logging.debug("Computing SDK path from buck")
+    try:
+        buckconfig = _load_android_buckconfig_values()
+    except BaseException as e:
+        logging.debug("Failed loading buckconfig: %s", e)
         return None
     if "android.sdk_path" not in buckconfig:
         return None
@@ -108,17 +148,61 @@ def find_android_build_tools_by_buck():
     if "android.build_tools_version" in buckconfig:
         version = buckconfig["android.build_tools_version"]
         assert isinstance(sdk_path, str)
-        return join(sdk_path, "build-tools", version)
+        return _filter_none_not_exists_ret_none(
+            [join(sdk_path, "build-tools", version)]
+        )
     else:
-        return _find_biggest_build_tools_version(sdk_path)
+        return _filter_none_not_exists_ret_none(
+            [_find_biggest_build_tools_version(sdk_path)]
+        )
 
 
 # This order is not necessarily equivalent to buck's. We prefer environment
 # variables as they are a lot cheaper.
-sdk_search_order = [
-    ("Env", find_android_build_tools_by_env),
-    ("Buck", find_android_build_tools_by_buck),
+_sdk_search_order = [
+    ("Env", find_android_path_by_env, find_android_build_tools_by_env),
+    ("Buck", find_android_path_by_buck, find_android_build_tools_by_buck),
 ]
+
+
+def add_android_sdk_path(path):
+    global _sdk_search_order
+    _sdk_search_order.insert(
+        0,
+        (
+            f"Path:{path}",
+            lambda: _filter_none_not_exists_ret_none(
+                [
+                    # For backwards compatibility
+                    *[
+                        dirname(dirname(p))
+                        for p in [path]
+                        if basename(dirname(p)) == "build-tools"
+                    ],
+                    path,
+                ]
+            ),
+            lambda: _filter_none_not_exists_ret_none(
+                [
+                    _find_biggest_build_tools_version(path),
+                    path,  # For backwards compatibility.
+                ]
+            ),
+        ),
+    )
+
+
+def get_android_sdk_path():
+    attempts = []
+    global _sdk_search_order
+    for name, base_dir_fn, _ in _sdk_search_order:
+        logging.debug("Attempting %s to find SDK path", name)
+        candidate = base_dir_fn()
+        if candidate:
+            return candidate[0]
+        attempts.append(name)
+
+    raise RuntimeError(f'Could not find SDK path, searched {", ".join(attempts)}')
 
 
 def find_android_build_tool(tool):
@@ -128,31 +212,34 @@ def find_android_build_tool(tool):
         try:
             if base_dir_fn is None:
                 return None
-            base_dir = base_dir_fn()
-            if not base_dir:
+            base_dirs = base_dir_fn()
+            if not base_dirs:
                 attempts.append(name + ":<Nothing>")
                 return None
-            attempts.append(name + ":" + base_dir)
-            candidate = join(base_dir, tool)
-            if os.path.exists(candidate):
-                return candidate
+            for base_dir in base_dirs:
+                candidate = join(base_dir, tool)
+                if os.path.exists(candidate):
+                    return candidate
+                attempts.append(name + ":" + base_dir)
         except BaseException:
             pass
         return None
 
-    global sdk_search_order
-    for name, base_dir_fn in sdk_search_order:
-        candidate = try_find(name, base_dir_fn)
+    global _sdk_search_order
+    for name, _, base_tools_fn in _sdk_search_order:
+        logging.debug("Attempting %s to find %s", name, tool)
+        candidate = try_find(name, base_tools_fn)
         if candidate:
             return candidate
 
     # By `PATH`.
+    logging.debug("Attempting PATH to find %s", tool)
     tool_path = shutil.which(tool)
     if tool_path is not None:
         return tool_path
     attempts.append("PATH")
 
-    raise RuntimeError("Could not find %s, searched %s" % (tool, ", ".join(attempts)))
+    raise RuntimeError(f'Could not find {tool}, searched {", ".join(attempts)}')
 
 
 def find_apksigner():
@@ -348,6 +435,7 @@ class UnpackManager:
         debug_mode=False,
         fast_repackage=False,
         reset_timestamps=True,
+        is_bundle=False,
     ):
         self.input_apk = input_apk
         self.extracted_apk_dir = extracted_apk_dir
@@ -356,21 +444,21 @@ class UnpackManager:
         self.debug_mode = debug_mode
         self.fast_repackage = fast_repackage
         self.reset_timestamps = reset_timestamps or debug_mode
+        self.is_bundle = is_bundle
 
     def __enter__(self):
-        dex_file_path = self.get_dex_file_path(self.input_apk, self.extracted_apk_dir)
-
-        self.dex_mode = pyredex.unpacker.detect_secondary_dex_mode(dex_file_path)
-        log("Detected dex mode " + str(type(self.dex_mode).__name__))
+        self.dex_mode = pyredex.unpacker.detect_secondary_dex_mode(
+            self.extracted_apk_dir, self.is_bundle
+        )
         log("Unpacking dex files")
-        self.dex_mode.unpackage(dex_file_path, self.dex_dir)
+        self.dex_mode.unpackage(self.extracted_apk_dir, self.dex_dir)
 
         log("Detecting Application Modules")
         store_metadata_dir = make_temp_dir(
             ".application_module_metadata", self.debug_mode
         )
         self.application_modules = pyredex.unpacker.ApplicationModule.detect(
-            self.extracted_apk_dir
+            self.extracted_apk_dir, self.is_bundle
         )
         store_files = []
         for module in self.application_modules:
@@ -396,7 +484,7 @@ class UnpackManager:
         log("Emit Locator Strings: %s" % self.have_locators)
 
         self.dex_mode.repackage(
-            self.get_dex_file_path(self.input_apk, self.extracted_apk_dir),
+            self.extracted_apk_dir,
             self.dex_dir,
             self.have_locators,
             fast_repackage=self.fast_repackage,
@@ -421,18 +509,6 @@ class UnpackManager:
             )
             locator_store_id = locator_store_id + 1
 
-    def get_dex_file_path(self, input_apk, extracted_apk_dir):
-        # base on file extension check if input is
-        # an apk file (".apk") or an Android bundle file (".aab")
-        # TODO: support loadable modules (at this point only
-        # very basic support is provided - in case of Android bundles
-        # "regular" apk file content is moved to the "base"
-        # sub-directory of the bundle archive)
-        if get_file_ext(input_apk) == ".aab":
-            return join(extracted_apk_dir, "base", "dex")
-        else:
-            return extracted_apk_dir
-
 
 class LibraryManager:
     """
@@ -442,8 +518,9 @@ class LibraryManager:
 
     temporary_libs_dir = None
 
-    def __init__(self, extracted_apk_dir):
+    def __init__(self, extracted_apk_dir, is_bundle=False):
         self.extracted_apk_dir = extracted_apk_dir
+        self.is_bundle = is_bundle
 
     def __enter__(self):
         # Some of the native libraries can be concatenated together into one
@@ -461,9 +538,13 @@ class LibraryManager:
                 if os.path.getsize(fullpath) > 0:
                     libs_to_extract.append(fullpath)
         if len(libs_to_extract) > 0:
-            libs_dir = join(self.extracted_apk_dir, "lib")
+            libs_dir = (
+                join(self.extracted_apk_dir, "base", "lib")
+                if self.is_bundle
+                else join(self.extracted_apk_dir, "lib")
+            )
             extracted_dir = join(libs_dir, "__extracted_libs__")
-            # Ensure both directories exist.
+            # Ensure all directories exist.
             self.temporary_libs_dir = ensure_libs_dir(libs_dir, extracted_dir)
             for i, lib_to_extract in enumerate(libs_to_extract):
                 extract_path = join(extracted_dir, "lib_{}.so".format(i))

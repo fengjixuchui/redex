@@ -33,6 +33,7 @@ struct IRTypeCheckerConfig : public Configurable {
 
   bool run_after_each_pass;
   bool verify_moves;
+  bool check_num_of_refs;
   std::unordered_set<std::string> run_after_passes;
   bool check_no_overwrite_this;
 };
@@ -48,6 +49,20 @@ struct HasherConfig : public Configurable {
   }
 
   bool run_after_each_pass;
+};
+
+struct AssessorConfig : public Configurable {
+ public:
+  void bind_config() override;
+  std::string get_config_name() override { return "AssessorConfig"; }
+  std::string get_config_doc() override {
+    return "This configuration is used to direct Redex to perform internal "
+           "quality assessments.";
+  }
+
+  bool run_after_each_pass{false};
+  bool run_initially{false};
+  bool run_finally{false};
 };
 
 struct CheckUniqueDeobfuscatedNamesConfig : public Configurable {

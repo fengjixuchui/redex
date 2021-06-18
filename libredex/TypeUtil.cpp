@@ -253,13 +253,7 @@ bool same_package(const DexType* type1, const DexType* type2) {
 }
 
 std::string get_simple_name(const DexType* type) {
-  std::string name = std::string(type->get_name()->c_str());
-  if (name.find('/') == std::string::npos) {
-    return name;
-  }
-  unsigned long pos_begin = name.find_last_of('/');
-  unsigned long pos_end = name.find_last_of(';');
-  return name.substr(pos_begin + 1, pos_end - pos_begin - 1);
+  return java_names::internal_to_simple(type->str());
 }
 
 uint32_t get_array_level(const DexType* type) {
@@ -447,6 +441,11 @@ boost::optional<int32_t> evaluate_type_check(const DexType* src_type,
                                              const DexType* test_type) {
   if (test_type == src_type) {
     // Trivial.
+    return 1;
+  }
+
+  // Early optimization: always true for test_type = java.lang.Object.
+  if (test_type == java_lang_Object()) {
     return 1;
   }
 

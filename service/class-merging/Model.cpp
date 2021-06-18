@@ -10,6 +10,7 @@
 #include "AnnoUtils.h"
 #include "ApproximateShapeMerging.h"
 #include "ConfigFiles.h"
+#include "MergeabilityCheck.h"
 #include "MergingStrategies.h"
 #include "PassManager.h"
 #include "RefChecker.h"
@@ -126,7 +127,7 @@ size_t trim_shapes(MergerType::ShapeCollector& shapes, size_t min_count) {
  */
 size_t trim_groups(MergerType::ShapeCollector& shapes, size_t min_count) {
   size_t num_trimmed_types = 0;
-  TRACE(CLMG, 5, "Trim groups with min_count %d", min_count);
+  TRACE(CLMG, 5, "Trim groups with min_count %zu", min_count);
   for (auto& shape_it : shapes) {
     std::vector<TypeSet> groups_to_remove;
     for (const auto& group_it : shape_it.second.groups) {
@@ -152,42 +153,21 @@ size_t trim_groups(MergerType::ShapeCollector& shapes, size_t min_count) {
   return num_trimmed_types;
 }
 
-void exclude_unsafe_sdk_and_store_refs(const TypeSet& mergeables,
-                                       const RefChecker& refchecker,
-                                       bool include_primary_dex,
-                                       TypeSet& non_mergeables) {
-  for (auto type : mergeables) {
-    if (non_mergeables.count(type)) {
-      continue;
-    }
-    auto cls = type_class(type);
-    if (!refchecker.check_class(cls)) {
-      non_mergeables.insert(type);
-    }
-    if (!include_primary_dex && refchecker.is_in_primary_dex(type)) {
-      non_mergeables.insert(type);
-    }
-  }
-}
-
 } // namespace
 
 const TypeSet Model::empty_set = TypeSet();
 
 Model::Model(const Scope& scope,
              const ConfigFiles& conf,
-             const DexStoresVector& stores,
              const ModelSpec& spec,
              const TypeSystem& type_system,
              const RefChecker& refchecker)
     : m_spec(spec),
+      m_types(spec.merging_targets.begin(), spec.merging_targets.end()),
       m_type_system(type_system),
       m_ref_checker(refchecker),
       m_scope(scope),
       m_conf(conf) {
-  for (const auto root : spec.roots) {
-    m_type_system.get_all_children(root, m_types);
-  }
   init(scope, spec, type_system);
 }
 
@@ -210,7 +190,10 @@ void Model::init(const Scope& scope,
   load_generated_types(spec, scope, type_system, m_types, generated);
   TRACE(CLMG, 4, "Generated types %ld", generated.size());
   exclude_types(spec.exclude_types);
-  find_non_mergeables(scope, generated);
+  MergeabilityChecker checker(scope, spec, m_ref_checker, generated, m_types);
+  m_non_mergeables = checker.get_non_mergeables();
+  TRACE(CLMG, 3, "Non mergeables %ld", m_non_mergeables.size());
+  m_metric.non_mergeables = m_non_mergeables.size();
   m_metric.all_types = m_types.size();
 }
 
@@ -393,12 +376,13 @@ void Model::create_mergers_helper(
     const MergerType::Shape& shape,
     const TypeSet& intf_set,
     const TypeSet& group_values,
+    const strategy::Strategy strategy,
     const boost::optional<InterdexSubgroupIdx>& interdex_subgroup_idx,
     const boost::optional<size_t>& max_mergeables_count,
     size_t min_mergeables_count) {
   InterdexSubgroupIdx subgroup_cnt = 0;
   strategy::apply_grouping(
-      group_values, min_mergeables_count, max_mergeables_count,
+      strategy, group_values, min_mergeables_count, max_mergeables_count,
       [&](const std::vector<const DexType*>& group) {
         create_merger_helper(merger_type, shape, intf_set, group,
                              interdex_subgroup_idx, subgroup_cnt++);
@@ -411,7 +395,7 @@ void Model::create_mergers_helper(
  * intention of adding them as excluded types in the config, and exclude them
  * from the merging transformation.
  */
-void Model::exclude_types(const std::unordered_set<DexType*>& exclude_types) {
+void Model::exclude_types(const ConstTypeHashSet& exclude_types) {
   for (const auto& type : exclude_types) {
     const auto& cls = type_class(type);
     redex_assert(cls != nullptr);
@@ -436,132 +420,6 @@ bool Model::is_excluded(const DexType* type) const {
     }
   }
   return false;
-}
-
-/**
- * Try to identify types referenced by operations that Class Merging does not
- * support. Such operations include reflections, instanceof checks on
- * no-type-tag shapes.
- * Ideally, part of the checks we perform below should be enforced at Java
- * source level. That is we should restrict such use cases on the generated Java
- * classes. As a result, we can make those generated classes easier to optimize
- * by Class Merging.
- */
-void Model::find_non_mergeables(const Scope& scope, const TypeSet& generated) {
-  for (const auto& type : m_types) {
-    const auto& cls = type_class(type);
-    if (!can_delete(cls)) {
-      m_non_mergeables.insert(type);
-      TRACE(CLMG, 5, "Cannot delete %s", SHOW(type));
-      continue;
-    }
-    // Why uninstantiable classes are not mergeable?
-    // TyepErasure is good at merging virtual methods horizontally by supporting
-    // virtual dispatches. There's no benefit to merge uninstantiable classes
-    // and no proper way to merge uninstatiable and instantiable classes
-    // together. Exclude the uninstantiable classes from ClassMerging and
-    // RemoveUninstantiablesPass should properly handle parts of them.
-    bool has_ctor = false;
-    for (const auto& method : cls->get_dmethods()) {
-      if (is_constructor(method) && method::is_init(method)) {
-        has_ctor = true;
-        break;
-      }
-    }
-    if (!has_ctor) {
-      m_non_mergeables.insert(type);
-      TRACE(CLMG, 5, "Has no ctor %s", SHOW(type));
-    }
-  }
-  TRACE(CLMG, 4, "Non mergeables (no delete) %ld", m_non_mergeables.size());
-
-  bool has_type_tag = m_spec.has_type_tag();
-  const auto& const_generated = generated;
-  const auto& const_types = m_types;
-  auto patcher = [has_type_tag, &const_generated,
-                  &const_types](DexMethod* meth) {
-    TypeSet current_non_mergeables;
-    auto code = meth->get_code();
-    if (!code || const_generated.count(meth->get_class())) {
-      return current_non_mergeables;
-    }
-
-    for (const auto& mie : InstructionIterable(code)) {
-      auto insn = mie.insn;
-
-      // Java language level enforcement recommended!
-      //
-      // For mergeables with type tags, it is not safe to merge those used
-      // with CONST_CLASS or NEW_ARRAY since we will lose granularity as we
-      // can't map to the old type anymore.
-      if (has_type_tag && insn->opcode() != OPCODE_CONST_CLASS &&
-          insn->opcode() != OPCODE_NEW_ARRAY) {
-        continue;
-      }
-
-      // Java language level enforcement recommended!
-      //
-      // For mergeables without a type tag, it is not safe to merge
-      // those used in an INSTANCE_OF, since we might lose granularity.
-      //
-      // Example where both <type_0> and <type_1> have the same shape (so end
-      //        up in the same merger)
-      //
-      //    INSTANCE_OF <v_result>, <v_obj> <type_0>
-      //    then label:
-      //      CHECK_CAST <type_0>
-      //    else labe:
-      //      CHECK_CAST <type_1>
-      if (!has_type_tag && insn->opcode() != OPCODE_INSTANCE_OF) {
-        continue;
-      }
-
-      const auto& type = type::get_element_type_if_array(insn->get_type());
-      if (const_types.count(type) > 0) {
-        current_non_mergeables.insert(type);
-      }
-    }
-
-    return current_non_mergeables;
-  };
-
-  TypeSet non_mergeables_opcode =
-      walk::parallel::methods<TypeSet, MergeContainers<TypeSet>>(scope,
-                                                                 patcher);
-
-  m_non_mergeables.insert(non_mergeables_opcode.begin(),
-                          non_mergeables_opcode.end());
-
-  TRACE(CLMG, 4, "Non mergeables (opcodes) %ld", m_non_mergeables.size());
-
-  static DexType* string_type = type::java_lang_String();
-
-  if (!m_spec.merge_types_with_static_fields) {
-    walk::fields(scope, [&](DexField* field) {
-      if (generated.count(field->get_class()) > 0) {
-        if (is_static(field)) {
-          auto rtype = type::get_element_type_if_array(field->get_type());
-          if (!type::is_primitive(rtype) && rtype != string_type) {
-            // If the type is either non-primitive or a list of
-            // non-primitive types (excluding Strings), then exclude it as
-            // we might change the initialization order.
-            TRACE(CLMG,
-                  5,
-                  "[non mergeable] %s as it contains a non-primitive "
-                  "static field",
-                  SHOW(field->get_class()));
-            m_non_mergeables.emplace(field->get_class());
-          }
-        }
-      }
-    });
-  }
-
-  exclude_unsafe_sdk_and_store_refs(
-      m_types, m_ref_checker, m_spec.include_primary_dex, m_non_mergeables);
-
-  m_metric.non_mergeables = m_non_mergeables.size();
-  TRACE(CLMG, 3, "Non mergeables %ld", m_non_mergeables.size());
 }
 
 /**
@@ -725,7 +583,6 @@ void Model::break_by_interface(const MergerType& merger,
 namespace {
 
 using TypeHashSet = std::unordered_set<DexType*>;
-using ConstTypeHashSet = std::unordered_set<const DexType*>;
 
 DexType* check_current_instance(const ConstTypeHashSet& types,
                                 IRInstruction* insn) {
@@ -886,12 +743,13 @@ void Model::flatten_shapes(const MergerType& merger,
           }
 
           create_mergers_helper(merger.type, *shape, *intf_set,
-                                new_groups[gindex], gindex, m_spec.max_count,
-                                m_spec.min_count);
+                                new_groups[gindex], m_spec.strategy, gindex,
+                                m_spec.max_count, m_spec.min_count);
         }
       } else {
         create_mergers_helper(merger.type, *shape, *intf_set, group_values,
-                              boost::none, m_spec.max_count, m_spec.min_count);
+                              m_spec.strategy, boost::none, m_spec.max_count,
+                              m_spec.min_count);
       }
     }
   }
@@ -933,11 +791,11 @@ void Model::map_fields(MergerType& merger,
       fields[index] = static_cast<DexField*>(DexField::make_field(
           type, DexString::make_string(ss.str()), field_type));
       TRACE(CLMG, 9,
-            "  -- A hole found at index %d, created a placeholder field of "
+            "  -- A hole found at index %zu, created a placeholder field of "
             "type %s",
             index, field_type->c_str());
     }
-    TRACE(CLMG, 8, "Add field map item [%ld]", fields.size());
+    TRACE(CLMG, 8, "Add field map item [%zu]", fields.size());
     merger.field_map[type] = fields;
   }
 }
@@ -1058,7 +916,7 @@ void Model::add_interface_scope(MergerType& merger,
   const auto& insert = [&](MergerType::InterfaceMethod& intf_meths) {
     intf_meths.interfaces.insert(intf_scope.interfaces.begin(),
                                  intf_scope.interfaces.end());
-    for (const auto vmeth : intf_scope.methods) {
+    for (const auto& vmeth : intf_scope.methods) {
       if (!vmeth.first->is_def()) continue;
       if (merger.mergeables.count(vmeth.first->get_class()) == 0) continue;
       TRACE(CLMG,
@@ -1338,14 +1196,13 @@ std::string Model::print(const DexType* type, int nest) const {
 
 Model Model::build_model(const Scope& scope,
                          const ConfigFiles& conf,
-                         const DexStoresVector& stores,
                          const ModelSpec& spec,
                          const TypeSystem& type_system,
                          const RefChecker& refchecker) {
   Timer t("build_model");
 
   TRACE(CLMG, 3, "Build Model for %s", to_string(spec).c_str());
-  Model model(scope, conf, stores, spec, type_system, refchecker);
+  Model model(scope, conf, spec, type_system, refchecker);
   TRACE(CLMG, 3, "Model:\n%s\nBuild Model done", model.print().c_str());
 
   TRACE(CLMG, 3, "Shape Model");

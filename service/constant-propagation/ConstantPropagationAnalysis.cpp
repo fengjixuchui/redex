@@ -8,6 +8,7 @@
 #include "ConstantPropagationAnalysis.h"
 
 #include <boost/functional/hash.hpp>
+#include <cinttypes>
 #include <mutex>
 #include <set>
 
@@ -95,7 +96,7 @@ void analyze_compare(const IRInstruction* insn, ConstantEnvironment* env) {
     TRACE(CONSTP, 5,
           "Propagated constant in branch instruction %s, "
           "Operands [%d] [%d] -> Result: [%d]",
-          SHOW(insn), l_val, r_val, result);
+          SHOW(insn), (int)l_val, (int)r_val, result);
     env->set(insn->dest(), SignedConstantDomain(result));
   } else {
     env->set(insn->dest(), SignedConstantDomain::top());
@@ -116,7 +117,19 @@ boost::optional<size_t> get_null_check_object_index(
   case OPCODE_INVOKE_STATIC: {
     auto method = insn->get_method();
     if (kotlin_null_check_assertions.count(method)) {
-      return 0;
+      // Note: We are not assuming here that the first argument is the checked
+      // argument of type object, as it might not be. For example,
+      // RemoveUnusedArgs may have removed or otherwise reordered the arguments.
+      // TODO: Don't mattern match at all, but make this a deep semantic
+      // analysis, as even this remaining pattern matching is brittle once we
+      // might start doing argument type weakening / strengthening
+      // optimizations.
+      auto& args = *method->get_proto()->get_args();
+      for (size_t i = 0; i < args.size(); i++) {
+        if (args.at(i) == type::java_lang_Object()) {
+          return i;
+        }
+      }
     }
     break;
   }
@@ -309,7 +322,7 @@ bool PrimitiveAnalyzer::analyze_default(const IRInstruction* insn,
 
 bool PrimitiveAnalyzer::analyze_const(const IRInstruction* insn,
                                       ConstantEnvironment* env) {
-  TRACE(CONSTP, 5, "Discovered new constant for reg: %d value: %ld",
+  TRACE(CONSTP, 5, "Discovered new constant for reg: %d value: %" PRIu64,
         insn->dest(), insn->get_literal());
   env->set(insn->dest(), SignedConstantDomain(insn->get_literal()));
   return true;
@@ -378,7 +391,7 @@ bool PrimitiveAnalyzer::analyze_binop_lit(
     const IRInstruction* insn, ConstantEnvironment* env) NO_UBSAN_ARITH {
   auto op = insn->opcode();
   int32_t lit = insn->get_literal();
-  TRACE(CONSTP, 5, "Attempting to fold %s with literal %lu", SHOW(insn), lit);
+  TRACE(CONSTP, 5, "Attempting to fold %s with literal %d", SHOW(insn), lit);
   auto cst = env->get<SignedConstantDomain>(insn->src(0)).get_constant();
   boost::optional<int64_t> result = boost::none;
   if (cst) {
@@ -807,21 +820,64 @@ ImmutableAttributeAnalyzerState::ImmutableAttributeAnalyzerState() {
   //  invoke-static v0 Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;
   // clang-format on
   // Other boxed types are similar.
-  std::array<DexType*, 8> boxed_types = {
-      type::java_lang_Boolean(), type::java_lang_Byte(),
-      type::java_lang_Short(),   type::java_lang_Character(),
-      type::java_lang_Integer(), type::java_lang_Long(),
-      type::java_lang_Float(),   type::java_lang_Double()};
-  for (auto type : boxed_types) {
-    auto valueOf = type::get_value_of_method_for_type(type);
-    auto getter_method = type::get_unboxing_method_for_type(type);
+  struct BoxedTypeInfo {
+    DexType* type;
+    long begin;
+    long end;
+  };
+  // See e.g.
+  // https://cs.android.com/android/platform/superproject/+/master:libcore/ojluni/src/main/java/java/lang/Integer.java
+  // for what is actually cached on Android. Note:
+  // - We don't handle java.lang.Boolean here, as that's more appropriate
+  // handled by the
+  //   BoxedBooleanAnalyzer, which also knows about the FALSE and TRUE fields.
+  // - The actual upper bound of cached Integers is actually configurable. We
+  //   just use the minimum value here.
+  std::array<BoxedTypeInfo, 7> boxed_type_infos = {
+      BoxedTypeInfo{type::java_lang_Byte(), -128, 128},
+      BoxedTypeInfo{type::java_lang_Short(), -128, 128},
+      BoxedTypeInfo{type::java_lang_Character(), 0, 128},
+      BoxedTypeInfo{type::java_lang_Integer(), -128, 128},
+      BoxedTypeInfo{type::java_lang_Long(), -128, 128},
+      BoxedTypeInfo{type::java_lang_Float(), 0, 0},
+      BoxedTypeInfo{type::java_lang_Double(), 0, 0}};
+  for (auto& bti : boxed_type_infos) {
+    auto valueOf = type::get_value_of_method_for_type(bti.type);
+    auto getter_method = type::get_unboxing_method_for_type(bti.type);
     if (valueOf && getter_method && valueOf->is_def() &&
         getter_method->is_def()) {
       add_initializer(valueOf->as_def(), getter_method->as_def())
           .set_src_id_of_attr(0)
           .set_obj_to_dest();
+      if (bti.end > bti.begin) {
+        add_cached_boxed_objects(valueOf->as_def(), bti.begin, bti.end);
+      }
     }
   }
+}
+
+void ImmutableAttributeAnalyzerState::add_cached_boxed_objects(
+    DexMethod* initialize_method, long begin, long end) {
+  always_assert(begin < end);
+  cached_boxed_objects.emplace(initialize_method,
+                               CachedBoxedObjects{begin, end});
+}
+
+bool ImmutableAttributeAnalyzerState::is_jvm_cached_object(
+    DexMethod* initialize_method, long value) const {
+  auto it = cached_boxed_objects.find(initialize_method);
+  if (it == cached_boxed_objects.end()) {
+    return false;
+  }
+  auto& cached_objects = it->second;
+  return value >= cached_objects.begin && value < cached_objects.end;
+}
+
+DexType* ImmutableAttributeAnalyzerState::initialized_type(
+    const DexMethod* initialize_method) {
+  return method::is_init(initialize_method)
+             ? initialize_method->get_class()
+             : initialize_method->get_proto()->get_rtype();
 }
 
 bool ImmutableAttributeAnalyzer::analyze_iget(
@@ -842,7 +898,7 @@ bool ImmutableAttributeAnalyzer::analyze_iget(
   }
   if (const auto& obj_or_none =
           this_domain.maybe_get<ObjectWithImmutAttrDomain>()) {
-    auto object = *obj_or_none->get_constant();
+    auto object = obj_or_none->get_constant();
     auto value = object->get_value(field);
     if (value && !value->is_top()) {
       if (const auto& string_value = value->maybe_get<StringDomain>()) {
@@ -854,8 +910,10 @@ bool ImmutableAttributeAnalyzer::analyze_iget(
         return true;
       }
     }
+    return false;
+  } else {
+    return false;
   }
-  return false;
 }
 
 bool ImmutableAttributeAnalyzer::analyze_invoke(
@@ -895,7 +953,7 @@ bool ImmutableAttributeAnalyzer::analyze_method_attr(
   }
   if (const auto& obj_or_none =
           this_domain.maybe_get<ObjectWithImmutAttrDomain>()) {
-    auto object = *obj_or_none->get_constant();
+    auto object = obj_or_none->get_constant();
     auto value = object->get_value(method);
     if (value && !value->is_top()) {
       if (const auto& string_value = value->maybe_get<StringDomain>()) {
@@ -907,8 +965,10 @@ bool ImmutableAttributeAnalyzer::analyze_method_attr(
         return true;
       }
     }
+    return false;
+  } else {
+    return false;
   }
-  return false;
 }
 
 bool ImmutableAttributeAnalyzer::analyze_method_initialization(
@@ -920,39 +980,50 @@ bool ImmutableAttributeAnalyzer::analyze_method_initialization(
   if (it == state->method_initializers.end()) {
     return false;
   }
-  std::shared_ptr<ObjectWithImmutAttr> object =
-      std::make_shared<ObjectWithImmutAttr>();
+  ObjectWithImmutAttr object(
+      ImmutableAttributeAnalyzerState::initialized_type(method),
+      it->second.size());
   // Only support one register for the object, can be easily extended. For
   // example, virtual method may return `this` pointer, so two registers are
   // holding the same heap object.
   reg_t obj_reg;
+  bool has_value = false;
   for (auto& initializer : it->second) {
     obj_reg = initializer.obj_is_dest()
                   ? RESULT_REGISTER
                   : insn->src(*initializer.insn_src_id_of_obj);
     const auto& domain = env->get(insn->src(initializer.insn_src_id_of_attr));
     if (const auto& signed_value = domain.maybe_get<SignedConstantDomain>()) {
-      if (!signed_value->get_constant()) {
+      auto constant = signed_value->get_constant();
+      if (!constant) {
+        object.write_value(initializer.attr, SignedConstantDomain::top());
         continue;
       }
-      object->write_value(initializer.attr, *signed_value);
+      object.jvm_cached_singleton =
+          state->is_jvm_cached_object(method, *constant);
+      object.write_value(initializer.attr, *signed_value);
+      has_value = true;
     } else if (const auto& string_value = domain.maybe_get<StringDomain>()) {
       if (!string_value->is_value()) {
+        object.write_value(initializer.attr, StringDomain::top());
         continue;
       }
-      object->write_value(initializer.attr, *string_value);
+      object.write_value(initializer.attr, *string_value);
+      has_value = true;
     } else if (const auto& type_value =
                    domain.maybe_get<ConstantClassObjectDomain>()) {
       if (!type_value->is_value()) {
+        object.write_value(initializer.attr, ConstantClassObjectDomain::top());
         continue;
       }
-      object->write_value(initializer.attr, *type_value);
+      object.write_value(initializer.attr, *type_value);
+      has_value = true;
     }
   }
-  if (object->empty()) {
+  if (!has_value || object.empty()) {
     return false;
   }
-  env->set(obj_reg, ObjectWithImmutAttrDomain(object));
+  env->set(obj_reg, ObjectWithImmutAttrDomain(std::move(object)));
   return true;
 }
 
@@ -1009,6 +1080,40 @@ ReturnState collect_return_state(
     }
   }
   return return_state;
+}
+
+bool EnumUtilsFieldAnalyzer::analyze_sget(
+    ImmutableAttributeAnalyzerState* state,
+    const IRInstruction* insn,
+    ConstantEnvironment* env) {
+  // The $EnumUtils class contains fields named fXXX, where XXX encodes a 32-bit
+  // number whose boxed value is stored as a java.lang.Integer instance in that
+  // field. These fields are initialized through Integer.valueOf(...).
+  auto integer_type = type::java_lang_Integer();
+  auto field = resolve_field(insn->get_field());
+  if (field == nullptr || !is_final(field) ||
+      field->get_type() != integer_type || field->str().empty() ||
+      field->str()[0] != 'f' ||
+      field->get_class() != DexType::make_type("Lredex/$EnumUtils;")) {
+    return false;
+  }
+  auto valueOf = method::java_lang_Integer_valueOf();
+  auto it = state->method_initializers.find(valueOf);
+  if (it == state->method_initializers.end()) {
+    return false;
+  }
+  const auto& initializers = it->second;
+  always_assert(initializers.size() == 1);
+  const auto& initializer = initializers.front();
+  always_assert(initializer.insn_src_id_of_attr == 0);
+
+  const auto& name = field->str();
+  auto value = std::stoi(name.substr(1));
+  ObjectWithImmutAttr object(integer_type, 1);
+  object.write_value(initializer.attr, SignedConstantDomain(value));
+  object.jvm_cached_singleton = state->is_jvm_cached_object(valueOf, value);
+  env->set(RESULT_REGISTER, ObjectWithImmutAttrDomain(std::move(object)));
+  return true;
 }
 
 namespace intraprocedural {
@@ -1084,7 +1189,7 @@ void FixpointIterator::analyze_instruction_no_throw(
 
 void FixpointIterator::analyze_node(const NodeId& block,
                                     ConstantEnvironment* state_at_entry) const {
-  TRACE(CONSTP, 5, "Analyzing block: %d", block->id());
+  TRACE(CONSTP, 5, "Analyzing block: %zu", block->id());
   auto last_insn = block->get_last_insn();
   for (auto& mie : InstructionIterable(block)) {
     auto insn = mie.insn;

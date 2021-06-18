@@ -12,6 +12,7 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "KotlinNullCheckMethods.h"
+#include "LiveRange.h"
 #include "PassManager.h"
 #include "ReachingDefinitions.h"
 #include "Show.h"
@@ -51,50 +52,63 @@ void RemoveNullcheckStringArg::run_pass(DexStoresVector& stores,
 bool RemoveNullcheckStringArg::setup(
     TransferMap& transfer_map, std::unordered_set<DexMethod*>& new_methods) {
 
-  bool is_param_check_V1_4 = false;
-  DexMethodRef* builtin_param =
+  DexMethodRef* builtin_param_V1_3 =
       DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE_V1_3);
-  if (!builtin_param) {
-    is_param_check_V1_4 = true;
-    builtin_param = DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE_V1_4);
-  }
-  /* If we didn't find the method, giveup. */
-  if (!builtin_param) {
-    return false;
-  }
-
-  bool is_expr_check_V1_4 = false;
-  DexMethodRef* builtin_expr =
+  DexMethodRef* builtin_param_V1_4 =
+      DexMethod::get_method(CHECK_PARAM_NULL_SIGNATURE_V1_4);
+  DexMethodRef* builtin_expr_V1_3 =
       DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE_V1_3);
-  if (!builtin_expr) {
-    is_expr_check_V1_4 = true;
-    builtin_expr = DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE_V1_4);
+  DexMethodRef* builtin_expr_V1_4 =
+      DexMethod::get_method(CHECK_EXPR_NULL_SIGNATURE_V1_4);
+
+  if (builtin_param_V1_3) {
+    auto new_check_param_method = get_wrapper_method_with_int_index(
+        NEW_CHECK_PARAM_NULL_SIGNATURE_V1_3,
+        WRAPPER_CHECK_PARAM_NULL_METHOD_V1_3, builtin_param_V1_3);
+    if (new_check_param_method) {
+      transfer_map[builtin_param_V1_3] =
+          std::make_pair(new_check_param_method, true);
+      new_methods.insert(new_check_param_method);
+    }
   }
-  if (!builtin_expr) {
-    return false;
+  if (builtin_param_V1_4) {
+    auto new_check_param_method = get_wrapper_method_with_int_index(
+        NEW_CHECK_PARAM_NULL_SIGNATURE_V1_4,
+        WRAPPER_CHECK_PARAM_NULL_METHOD_V1_4, builtin_param_V1_4);
+    if (new_check_param_method) {
+      transfer_map[builtin_param_V1_4] =
+          std::make_pair(new_check_param_method, true);
+      new_methods.insert(new_check_param_method);
+    }
   }
 
-  if (is_expr_check_V1_4 != is_param_check_V1_4) {
-    /* We have V1_3 and v1_4 mthods. */
-    TRACE(NULLCHECK, 1, "We have Kotlin 1.3 and 1.4 NULLCHECK assertions");
-    return false;
+  if (builtin_expr_V1_3) {
+    auto new_check_expr_method = get_wrapper_method(
+        NEW_CHECK_EXPR_NULL_SIGNATURE_V1_3, WRAPPER_CHECK_EXPR_NULL_METHOD_V1_3,
+        builtin_expr_V1_3);
+    if (new_check_expr_method) {
+      transfer_map[builtin_expr_V1_3] =
+          std::make_pair(new_check_expr_method, false);
+      new_methods.insert(new_check_expr_method);
+    }
   }
 
-  auto new_check_param_method = get_wrapper_method_with_int_index(
-      NEW_CHECK_PARAM_NULL_SIGNATURE, WRAPPER_CHECK_PARAM_NULL_METHOD,
-      builtin_param);
-  auto new_check_expr_method =
-      get_wrapper_method(NEW_CHECK_EXPR_NULL_SIGNATURE,
-                         WRAPPER_CHECK_EXPR_NULL_METHOD, builtin_expr);
+  if (builtin_expr_V1_4) {
+    auto new_check_expr_method = get_wrapper_method(
+        NEW_CHECK_EXPR_NULL_SIGNATURE_V1_4, WRAPPER_CHECK_EXPR_NULL_METHOD_V1_4,
+        builtin_expr_V1_4);
+    if (new_check_expr_method) {
+      transfer_map[builtin_expr_V1_4] =
+          std::make_pair(new_check_expr_method, false);
+      new_methods.insert(new_check_expr_method);
+    }
+  }
+
   /* If we could not generate suitable wrapper method, giveup. */
-  if (!new_check_param_method || !new_check_expr_method) {
+  if (new_methods.empty()) {
     return false;
   }
-  transfer_map[builtin_param] = std::make_pair(new_check_param_method, true);
-  transfer_map[builtin_expr] = std::make_pair(new_check_expr_method, false);
 
-  new_methods.insert(new_check_expr_method);
-  new_methods.insert(new_check_param_method);
   return true;
 }
 
@@ -108,8 +122,8 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
     return nullptr;
   }
 
-  auto host_cls = type_class(builtin->get_class());
-  if (!host_cls) {
+  auto* host_cls = type_class(builtin->get_class());
+  if (!host_cls || host_cls->is_external()) {
     return nullptr;
   }
 
@@ -123,6 +137,7 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
   auto obj_arg = method_creator.get_local(0);
 
   auto main_block = method_creator.get_main_block();
+  auto if_block = main_block->if_testz(OPCODE_IF_NEZ, obj_arg);
   auto str_type = DexType::get_type("Ljava/lang/String;");
   if (!str_type) {
     return nullptr;
@@ -131,9 +146,10 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method(
   auto str_const = method_creator.make_local(str_type);
 
   // const-string v2, "UNKNOWN"
-  main_block->load_const(str_const, DexString::make_string("UNKNOWN"));
+  if_block->load_const(str_const, DexString::make_string("UNKNOWN"));
 
-  main_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_const});
+  if_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_const});
+  if_block->ret_void();
   main_block->ret_void();
 
   auto new_method = method_creator.create();
@@ -194,35 +210,36 @@ DexMethod* RemoveNullcheckStringArg::get_wrapper_method_with_int_index(
   auto str_builder = method_creator.make_local(str_builder_type);
   auto str_const = method_creator.make_local(str_type);
   auto str_res = method_creator.make_local(str_type);
+  auto if_block = main_block->if_testz(OPCODE_IF_NEZ, obj_arg);
 
   // invoke-static {v3}, Ljava/lang/Integer;.toString:(I)Ljava/lang/String;
-  main_block->invoke(OPCODE_INVOKE_STATIC, to_str_method, {int_ind});
+  if_block->invoke(OPCODE_INVOKE_STATIC, to_str_method, {int_ind});
   // move-result-object v3
-  main_block->move_result(str_ind, str_type);
+  if_block->move_result(str_ind, str_type);
   // new-instance v1, Ljava/lang/StringBuilder;
-  main_block->new_instance(str_builder_type, str_builder);
+  if_block->new_instance(str_builder_type, str_builder);
   // invoke-direct {v1}, Ljava/lang/StringBuilder;.<init>:()V
-  main_block->invoke(OPCODE_INVOKE_DIRECT, str_builder_init_method,
-                     {str_builder});
+  if_block->invoke(OPCODE_INVOKE_DIRECT, str_builder_init_method,
+                   {str_builder});
   // const-string v2, "param index = "
-  main_block->load_const(str_const,
-                         DexString::make_string("param at index = "));
+  if_block->load_const(str_const, DexString::make_string("param at index = "));
   // invoke-virtual {v1, v2},
   // Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
-  main_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
-                     {str_builder, str_const});
+  if_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
+                   {str_builder, str_const});
   // invoke-virtual {v1, v3},
   // Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
-  main_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
-                     {str_builder, str_ind});
+  if_block->invoke(OPCODE_INVOKE_VIRTUAL, append_method,
+                   {str_builder, str_ind});
   // invoke-virtual {v1},
   // Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;
-  main_block->invoke(OPCODE_INVOKE_VIRTUAL, str_builder_to_str_method,
-                     {str_builder});
+  if_block->invoke(OPCODE_INVOKE_VIRTUAL, str_builder_to_str_method,
+                   {str_builder});
   // move-result-object v3
-  main_block->move_result(str_res, str_type);
+  if_block->move_result(str_res, str_type);
 
-  main_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_res});
+  if_block->invoke(OPCODE_INVOKE_STATIC, builtin, {obj_arg, str_res});
+  if_block->ret_void();
   main_block->ret_void();
 
   auto new_method = method_creator.create();
@@ -250,6 +267,9 @@ RemoveNullcheckStringArg::Stats RemoveNullcheckStringArg::change_in_cfg(
     param_index.insert(std::make_pair(load_insn->dest(), arg_index++));
   }
 
+  live_range::MoveAwareChains chains(cfg);
+  live_range::DefUseChains du_chains = chains.get_def_use_chains();
+
   for (cfg::Block* block : cfg.blocks()) {
     auto env = reaching_defs_iter.get_entry_state_at(block);
     if (env.is_bottom()) {
@@ -271,14 +291,36 @@ RemoveNullcheckStringArg::Stats RemoveNullcheckStringArg::change_in_cfg(
         // We could have params copied via intermediate registers.
         auto defs = env.get(insn->src(0));
         always_assert(!defs.is_bottom() && !defs.is_top());
-        always_assert(defs.elements().size() == 1);
-        auto def = *defs.elements().begin();
-        auto def_op = def->opcode();
-        always_assert(def_op == IOPCODE_LOAD_PARAM ||
-                      def_op == IOPCODE_LOAD_PARAM_OBJECT ||
-                      def_op == IOPCODE_LOAD_PARAM_OBJECT);
-        auto param_iter = param_index.find(def->dest());
+        IRInstruction* param_load_insn = nullptr;
+        for (auto* def : defs.elements()) {
+          if (!opcode::is_a_load_param(def->opcode())) {
+            continue;
+          }
+          if (param_load_insn) {
+            /* Multiple param load insns. Should never happen.*/
+            param_load_insn = nullptr;
+            break;
+          }
+          param_load_insn = def;
+        }
+        if (!param_load_insn) {
+          /* No param load insn. Should never happen. In any case, skipping this
+           * insn is OK. */
+          continue;
+        }
+        auto param_iter = param_index.find(param_load_insn->dest());
         always_assert(param_iter != param_index.end());
+
+        auto use_set = du_chains[param_load_insn];
+        if (use_set.size() == 1) {
+          for (const auto& p : use_set) {
+            always_assert(p.insn == insn);
+          }
+          // If we have single use which is null check, remove null check.
+          m.remove(cfg.find_insn(insn));
+          continue;
+        }
+
         auto index = param_iter->second;
         auto tmp_reg = cfg.allocate_temp();
         IRInstruction* cst_insn = new IRInstruction(OPCODE_CONST);
@@ -307,7 +349,7 @@ void RemoveNullcheckStringArg::Stats::report(PassManager& mgr) const {
   TRACE(NULLCHECK, 2, "RemoveNullcheckStringArgPass Stats:");
   TRACE(NULLCHECK,
         2,
-        "RemoveNullcheckStringArgPass insns changed = %u",
+        "RemoveNullcheckStringArgPass insns changed = %zu",
         null_check_insns_changed);
 }
 

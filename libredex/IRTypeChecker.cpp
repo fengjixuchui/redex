@@ -9,6 +9,7 @@
 
 #include <boost/optional/optional.hpp>
 
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "Match.h"
 #include "Resolver.h"
@@ -567,6 +568,39 @@ Result check_structure(const DexMethod* method, bool check_no_overwrite_this) {
   return check_uninitialized(method);
 }
 
+/*
+ * Do a linear pass to sanity-check the structure of the positions.
+ */
+Result check_positions(const DexMethod* method) {
+  auto code = method->get_code();
+  std::unordered_set<DexPosition*> positions;
+  for (auto it = code->begin(); it != code->end(); ++it) {
+    if (it->type != MFLOW_POSITION) {
+      continue;
+    }
+    auto pos = it->pos.get();
+    if (!positions.insert(pos).second) {
+      return Result::make_error("Duplicate position " + show(pos));
+    }
+  }
+  std::unordered_set<DexPosition*> visited_parents;
+  for (auto pos : positions) {
+    if (!pos->parent) {
+      continue;
+    }
+    if (!positions.count(pos->parent)) {
+      return Result::make_error("Missing parent " + show(pos));
+    }
+    for (auto p = pos; p; p = p->parent) {
+      if (!visited_parents.insert(p).second) {
+        return Result::make_error("Cyclic parents around " + show(pos));
+      }
+    }
+    visited_parents.clear();
+  }
+  return Result::Ok();
+}
+
 /**
  * Validate if the caller has the permit to call a method or access a field.
  *
@@ -611,7 +645,7 @@ void validate_access(const DexMethod* accessor, const DexMember* accessee) {
   // TODO(fengliu): We should enforce the correctness when visiting external dex
   // members.
   if (accessee->is_external()) {
-    TRACE(TYPE, 2, out.str().c_str());
+    TRACE(TYPE, 2, "%s", out.str().c_str());
     return;
   }
 
@@ -690,6 +724,15 @@ void IRTypeChecker::run() {
       return;
     }
   }
+
+  auto positions_result = check_positions(m_dex_method);
+  if (positions_result != Result::Ok()) {
+    m_complete = true;
+    m_good = false;
+    m_what = positions_result.error_message();
+    return;
+  }
+
   m_complete = true;
 
   if (traceEnabled(TYPE, 9)) {
@@ -971,22 +1014,25 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
   }
   case OPCODE_IGET: {
     assume_reference(current_state, insn->src(0));
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(0)), f_cls);
     break;
   }
   case OPCODE_IGET_BOOLEAN:
   case OPCODE_IGET_BYTE:
   case OPCODE_IGET_CHAR:
-  case OPCODE_IGET_SHORT: {
-    assume_reference(current_state, insn->src(0));
-    break;
-  }
+  case OPCODE_IGET_SHORT:
   case OPCODE_IGET_WIDE: {
     assume_reference(current_state, insn->src(0));
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(0)), f_cls);
     break;
   }
   case OPCODE_IGET_OBJECT: {
     assume_reference(current_state, insn->src(0));
     always_assert(insn->has_field());
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(0)), f_cls);
     break;
   }
   case OPCODE_IPUT: {
@@ -997,6 +1043,8 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
       assume_integer(current_state, insn->src(0));
     }
     assume_reference(current_state, insn->src(1));
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(1)), f_cls);
     break;
   }
   case OPCODE_IPUT_BOOLEAN:
@@ -1005,16 +1053,26 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
   case OPCODE_IPUT_SHORT: {
     assume_integer(current_state, insn->src(0));
     assume_reference(current_state, insn->src(1));
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(1)), f_cls);
     break;
   }
   case OPCODE_IPUT_WIDE: {
     assume_wide_scalar(current_state, insn->src(0));
     assume_reference(current_state, insn->src(1));
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(1)), f_cls);
     break;
   }
   case OPCODE_IPUT_OBJECT: {
     assume_reference(current_state, insn->src(0));
     assume_reference(current_state, insn->src(1));
+    always_assert(insn->has_field());
+    const auto f_type = insn->get_field()->get_type();
+    assume_assignable(current_state->get_dex_type(insn->src(0)), f_type);
+    const auto f_cls = insn->get_field()->get_class();
+    assume_assignable(current_state->get_dex_type(insn->src(1)), f_cls);
+
     break;
   }
   case OPCODE_SGET: {

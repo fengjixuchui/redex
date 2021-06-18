@@ -12,6 +12,7 @@
 #include "ConcurrentContainers.h"
 #include "MethodOverrideGraph.h"
 #include "Show.h"
+#include "Trace.h"
 #include "Walkers.h"
 
 namespace mog = method_override_graph;
@@ -141,23 +142,43 @@ RootAndDynamic MultipleCalleeBaseStrategy::get_roots() const {
       add_root_method_overrides(overiden_method);
     }
   });
-  // Gather methods that override or implement external methods as well.
+  // Gather methods that override or implement external or native methods
+  // as well.
   for (auto& pair : m_method_override_graph.nodes()) {
     auto method = pair.first;
-    if (!method->is_external()) {
-      continue;
-    }
-    dynamic_methods.emplace(method);
-    const auto& overriding_methods =
-        mog::get_overriding_methods(m_method_override_graph, method);
-    for (auto* overriding : overriding_methods) {
-      if (overriding->is_external()) {
-        dynamic_methods.emplace(method);
+    if (method->is_external()) {
+      dynamic_methods.emplace(method);
+      const auto& overriding_methods =
+          mog::get_overriding_methods(m_method_override_graph, method);
+      for (auto* overriding : overriding_methods) {
+        if (overriding->is_external()) {
+          dynamic_methods.emplace(overriding);
+        }
+        if (!overriding->is_external() && !emplaced_methods.count(overriding) &&
+            overriding->get_code()) {
+          roots.emplace_back(overriding);
+          emplaced_methods.emplace(overriding);
+        }
       }
-      if (!overriding->is_external() && !emplaced_methods.count(overriding) &&
-          overriding->get_code()) {
-        roots.emplace_back(overriding);
-        emplaced_methods.emplace(overriding);
+      // Internal methods might be overriden by external methods. Add such
+      // methods to dynamic methods to avoid return value propagation as well.
+      const auto& overiden_methods =
+          mog::get_overridden_methods(m_method_override_graph, method, true);
+      for (auto m : overiden_methods) {
+        dynamic_methods.emplace(m);
+      }
+    }
+    if (is_native(method)) {
+      dynamic_methods.emplace(method);
+      const auto& overriding_methods =
+          mog::get_overriding_methods(m_method_override_graph, method, true);
+      for (auto m : overriding_methods) {
+        dynamic_methods.emplace(m);
+      }
+      const auto& overiden_methods =
+          mog::get_overridden_methods(m_method_override_graph, method, true);
+      for (auto m : overiden_methods) {
+        dynamic_methods.emplace(m);
       }
     }
   }
@@ -187,7 +208,8 @@ DexMethod* resolve_interface_virtual_callee(const IRInstruction* insn,
     if (callee == nullptr) {
       auto insn_method_cls = type_class(insn->get_method()->get_class());
       if (insn_method_cls != nullptr && !insn_method_cls->is_external()) {
-        fprintf(stderr, "Unexpected unresolved insn %s", SHOW(insn));
+        TRACE(CALLGRAPH, 1, "Unexpected unresolved insn %s in %s", SHOW(insn),
+              SHOW(caller));
       }
     }
   }

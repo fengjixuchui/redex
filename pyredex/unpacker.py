@@ -13,24 +13,26 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import zipfile
-from os.path import basename, dirname, getsize, isdir, isfile, join
+from os.path import basename, dirname, getsize, isdir, isfile, join, normpath
 
 from pyredex.logger import log
 from pyredex.utils import ZipReset, abs_glob
 
 
 class ApplicationModule(object):
-    def __init__(self, extracted_apk_dir, name, canary_prefix, dependencies):
+    def __init__(self, extracted_apk_dir, name, canary_prefix, dependencies, split=""):
         self.name = name
-        self.path = join("assets", name)
+        self.path = join(split, "assets", name)
         self.canary_prefix = canary_prefix
         self.dependencies = dependencies
 
     @staticmethod
-    def detect(extracted_apk_dir):
+    def detect(extracted_apk_dir, is_bundle=False):
         modules = []
-        for candidate in abs_glob(extracted_apk_dir, "assets/*/metadata.txt"):
+        pattern = "*/assets/*/metadata.txt" if is_bundle else "assets/*/metadata.txt"
+        for candidate in abs_glob(extracted_apk_dir, pattern):
             with open(candidate) as metadata:
                 name = None
                 dependencies = []
@@ -44,14 +46,19 @@ class ApplicationModule(object):
                         dependencies.append(tokens[1])
                     if tokens[0][0] != ".":
                         canary_match = re.search(
-                            "([A-Za-z0-9]*)[.]dex[0-9]+[.]Canary", tokens[2]
+                            "([A-Za-z0-9]*)[.]dex[0-9][0-9_]*[.]Canary", tokens[2]
                         )
                         if canary_match is not None:
                             canary_prefix = canary_match.group(1)
                 if name is not None:
+                    split = (
+                        basename(normpath(join(candidate, "../../../")))
+                        if is_bundle
+                        else ""
+                    )
                     modules.append(
                         ApplicationModule(
-                            extracted_apk_dir, name, canary_prefix, dependencies
+                            extracted_apk_dir, name, canary_prefix, dependencies, split
                         )
                     )
         modules.sort(key=lambda m: m.path)
@@ -73,7 +80,7 @@ class ApplicationModule(object):
 
     def unpackage(self, extracted_apk_dir, dex_dir, unpackage_metadata=False):
         self.dex_mode = XZSDexMode(
-            dex_asset_dir=self.path,
+            secondary_dir=self.path,
             store_name=self.name,
             dex_prefix=self.name,
             canary_prefix=self.canary_prefix,
@@ -85,7 +92,7 @@ class ApplicationModule(object):
             self.dex_mode.unpackage(extracted_apk_dir, dex_dir, unpackage_metadata)
         else:
             self.dex_mode = SubdirDexMode(
-                dex_asset_dir=self.path,
+                secondary_dir=self.path,
                 store_name=self.name,
                 dex_prefix=self.name,
                 canary_prefix=self.canary_prefix,
@@ -97,7 +104,7 @@ class ApplicationModule(object):
                 self.dex_mode.unpackage(extracted_apk_dir, dex_dir, unpackage_metadata)
             else:
                 self.dex_mode = Api21ModuleDexMode(
-                    dex_asset_dir=self.path,
+                    secondary_dir=self.path,
                     store_name=self.name,
                     canary_prefix=self.canary_prefix,
                     store_id=self.name,
@@ -172,14 +179,17 @@ class DexMetadata(object):
 
 
 class BaseDexMode(object):
-    def __init__(self, dex_prefix, canary_prefix, store_id, dependencies):
+    def __init__(self, primary_dir, dex_prefix, canary_prefix, store_id, dependencies):
+        self._primary_dir = primary_dir
         self._dex_prefix = dex_prefix
         self._canary_prefix = canary_prefix
         self._store_id = store_id
         self._dependencies = dependencies
 
     def unpackage(self, extracted_apk_dir, dex_dir):
-        primary_dex = join(extracted_apk_dir, self._dex_prefix + ".dex")
+        primary_dex = join(
+            extracted_apk_dir, self._primary_dir, self._dex_prefix + ".dex"
+        )
         if os.path.exists(primary_dex):
             shutil.move(primary_dex, dex_dir)
 
@@ -193,7 +203,7 @@ class BaseDexMode(object):
     ):
         primary_dex = join(dex_dir, self._dex_prefix + ".dex")
         if os.path.exists(primary_dex):
-            shutil.move(primary_dex, extracted_apk_dir)
+            shutil.move(primary_dex, join(extracted_apk_dir, self._primary_dir))
 
     def get_canary(self, i):
         return self._canary_prefix + ".dex%02d.Canary" % i
@@ -210,29 +220,34 @@ class Api21DexMode(BaseDexMode):
 
     def __init__(
         self,
-        dex_asset_dir="assets/secondary-program-dex-jars",
+        primary_dir="",
+        secondary_dir="assets/secondary-program-dex-jars",
         dex_prefix="classes",
         canary_prefix="secondary",
         is_root_relative=True,
         store_id=None,
         dependencies=None,
     ):
-        BaseDexMode.__init__(self, dex_prefix, canary_prefix, store_id, dependencies)
-        self._secondary_dir = dex_asset_dir
+        BaseDexMode.__init__(
+            self, primary_dir, dex_prefix, canary_prefix, store_id, dependencies
+        )
+        self._secondary_dir = secondary_dir
         self._is_root_relative = is_root_relative
 
     def detect(self, extracted_apk_dir):
         # Note: This mode is the fallback and we only check for it after
         # checking for the other modes. This should return true for any
         # apk.
-        return isfile(join(extracted_apk_dir, self._dex_prefix + ".dex"))
+        return isfile(
+            join(extracted_apk_dir, self._primary_dir, self._dex_prefix + ".dex")
+        )
 
     def unpackage(self, extracted_apk_dir, dex_dir, unpackage_metadata=False):
         BaseDexMode.unpackage(self, extracted_apk_dir, dex_dir)
 
         metadata_dir = join(extracted_apk_dir, self._secondary_dir)
         if self._is_root_relative:
-            extracted_dex_dir = extracted_apk_dir
+            extracted_dex_dir = join(extracted_apk_dir, self._primary_dir)
         else:
             extracted_dex_dir = metadata_dir
         for path in abs_glob(extracted_dex_dir, "*.dex"):
@@ -270,7 +285,7 @@ class Api21DexMode(BaseDexMode):
                 break
             metadata.add_dex(dex_path, BaseDexMode.get_canary(self, i - 1))
             if self._is_root_relative:
-                shutil.move(dex_path, extracted_apk_dir)
+                shutil.move(dex_path, join(extracted_apk_dir, self._primary_dir))
             else:
                 shutil.move(dex_path, metadata_dir)
         if os.path.exists(metadata_dir):
@@ -285,7 +300,7 @@ class Api21ModuleDexMode(Api21DexMode):
 
     def __init__(
         self,
-        dex_asset_dir,
+        secondary_dir,
         store_name="secondary",
         canary_prefix="secondary",
         store_id=None,
@@ -293,14 +308,14 @@ class Api21ModuleDexMode(Api21DexMode):
     ):
         Api21DexMode.__init__(
             self,
-            dex_asset_dir=dex_asset_dir,
+            primary_dir="",
+            secondary_dir=secondary_dir,
             dex_prefix=store_name,
             canary_prefix=canary_prefix,
             store_id=store_id,
             dependencies=dependencies,
             is_root_relative=False,
         )
-        self._secondary_dir = dex_asset_dir
         self._store_name = store_name
 
     def detect(self, extracted_apk_dir):
@@ -315,15 +330,18 @@ class SubdirDexMode(BaseDexMode):
 
     def __init__(
         self,
-        dex_asset_dir="assets/secondary-program-dex-jars",
+        primary_dir="",
+        secondary_dir="assets/secondary-program-dex-jars",
         store_name="secondary",
         dex_prefix="classes",
         canary_prefix="secondary",
         store_id=None,
         dependencies=None,
     ):
-        BaseDexMode.__init__(self, dex_prefix, canary_prefix, store_id, dependencies)
-        self._secondary_dir = dex_asset_dir
+        BaseDexMode.__init__(
+            self, primary_dir, dex_prefix, canary_prefix, store_id, dependencies
+        )
+        self._secondary_dir = secondary_dir
         self._store_name = store_name
 
     def detect(self, extracted_apk_dir):
@@ -461,6 +479,20 @@ def pack_xz(input, output, compression_level=9, threads=6, check=lzma.CHECK_CRC3
         output_f.write(end_buf)
 
 
+def unpack_tar_xz(input, output_dir):
+    # See whether the `xz` binary exists. It may be faster because of multithreaded decoding.
+    if shutil.which("xz") and shutil.which("tar"):
+        cmd = f'XZ_OPT=-T6 tar xf "{input}" -C "{output_dir}"'
+        subprocess.check_call(cmd, shell=True)  # noqa: P204
+        return
+
+    _warn_xz()
+
+    with tarfile.open(name=input, mode="r:xz") as t:
+        os.makedirs(output_dir, exist_ok=True)
+        t.extractall(output_dir)
+
+
 class XZSDexMode(BaseDexMode):
     """
     Secondary dex files are packaged in individual jar files where are then
@@ -471,15 +503,18 @@ class XZSDexMode(BaseDexMode):
 
     def __init__(
         self,
-        dex_asset_dir="assets/secondary-program-dex-jars",
+        primary_dir="",
+        secondary_dir="assets/secondary-program-dex-jars",
         store_name="secondary",
         dex_prefix="classes",
         canary_prefix="secondary",
         store_id=None,
         dependencies=None,
     ):
-        BaseDexMode.__init__(self, dex_prefix, canary_prefix, store_id, dependencies)
-        self._xzs_dir = dex_asset_dir
+        BaseDexMode.__init__(
+            self, primary_dir, dex_prefix, canary_prefix, store_id, dependencies
+        )
+        self._xzs_dir = secondary_dir
         self._xzs_filename = store_name + ".dex.jar.xzs"
         self._store_name = store_name
 
@@ -658,14 +693,29 @@ class XZSDexMode(BaseDexMode):
 # These are checked in order from top to bottom. The first one to have detect()
 # return true will be used.
 SECONDARY_DEX_MODES = [XZSDexMode(), SubdirDexMode(), Api21DexMode()]
+BUNDLE_SECONDARY_DEX_MODES = [
+    XZSDexMode(
+        primary_dir="base/dex",
+        secondary_dir="base/assets/secondary-program-dex-jars",
+    ),
+    SubdirDexMode(
+        primary_dir="base/dex",
+        secondary_dir="base/assets/secondary-program-dex-jars",
+    ),
+    Api21DexMode(
+        primary_dir="base/dex",
+        secondary_dir="base/assets/secondary-program-dex-jars",
+    ),
+]
 
 
 class UnknownSecondaryDexModeException(Exception):
     pass
 
 
-def detect_secondary_dex_mode(extracted_apk_dir):
-    for mode in SECONDARY_DEX_MODES:
+def detect_secondary_dex_mode(extracted_apk_dir, is_bundle=False):
+    modes = BUNDLE_SECONDARY_DEX_MODES if is_bundle else SECONDARY_DEX_MODES
+    for mode in modes:
         if mode.detect(extracted_apk_dir):
             return mode
     raise UnknownSecondaryDexModeException()

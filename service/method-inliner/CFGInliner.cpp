@@ -13,6 +13,7 @@
 #include "IRList.h"
 #include "IROpcode.h"
 #include "Show.h"
+#include "SourceBlocks.h"
 #include "Trace.h"
 
 namespace cfg {
@@ -23,24 +24,168 @@ namespace cfg {
 /*
  * Copy callee's blocks into caller
  */
-void CFGInliner::inline_cfg(ControlFlowGraph* caller,
-                            const InstructionIterator& callsite,
-                            const ControlFlowGraph& callee_orig,
-                            size_t next_caller_reg) {
+void CFGInliner::inline_cfg(
+    ControlFlowGraph* caller,
+    const InstructionIterator& callsite,
+    const ControlFlowGraph& callee_orig,
+    size_t next_caller_reg,
+    const std::unordered_set<cfg::Block*>* dead_blocks) {
   CFGInlinerPlugin base_plugin;
-  inline_cfg(caller, callsite, callee_orig, next_caller_reg, base_plugin);
+  inline_cfg(caller, callsite, callee_orig, next_caller_reg, base_plugin,
+             dead_blocks);
 }
 
-void CFGInliner::inline_cfg(ControlFlowGraph* caller,
-                            const InstructionIterator& inline_site,
-                            const ControlFlowGraph& callee_orig,
-                            size_t next_caller_reg,
-                            CFGInlinerPlugin& plugin) {
+namespace {
+
+// Maybe replace this with a RedexContext API.
+size_t num_interactions(const InstructionIterator& inline_site,
+                        const ControlFlowGraph& callee_cfg) {
+  {
+    auto sb_vec = source_blocks::gather_source_blocks(inline_site.block());
+    if (!sb_vec.empty()) {
+      return sb_vec[0]->vals.size();
+    }
+  }
+
+  {
+    auto sb_vec = source_blocks::gather_source_blocks(callee_cfg.entry_block());
+    if (!sb_vec.empty()) {
+      return sb_vec[0]->vals.size();
+    }
+  }
+
+  return 0;
+}
+
+boost::optional<float> get_source_blocks_factor(
+    const InstructionIterator& inline_site,
+    const ControlFlowGraph& callee_cfg,
+    size_t idx) {
+  auto caller_block = inline_site.block();
+  float caller_val;
+  {
+    auto* sb = source_blocks::get_first_source_block(caller_block);
+    if (sb == nullptr) {
+      return boost::none;
+    }
+    auto val = sb->get_val(idx);
+    if (!val) {
+      return boost::none;
+    }
+    caller_val = *val;
+  }
+  if (caller_val == 0) {
+    return 0.0f;
+  }
+
+  // Assume that integrity is guaranteed, so that val at entry is
+  // dominating all blocks.
+  float callee_val;
+  {
+    auto sb = source_blocks::get_first_source_block(callee_cfg.entry_block());
+    if (sb == nullptr) {
+      return boost::none;
+    }
+    auto val = sb->get_val(idx);
+    if (!val) {
+      return boost::none;
+    }
+    callee_val = *val;
+  }
+  if (callee_val == 0) {
+    return 0.0f;
+  }
+
+  // Expectation would be that callee_val >= caller_val. But tracking might
+  // not be complete.
+
+  // This will normalize to the value at the callsite.
+  return caller_val / callee_val;
+}
+
+void normalize_source_blocks(ControlFlowGraph& cfg, float factor, size_t idx) {
+  for (auto* b : cfg.blocks()) {
+    source_blocks::foreach_source_block(b, [&](auto* sb) {
+      if (sb->vals[idx]) {
+        sb->vals[idx]->val *= factor;
+      }
+    });
+  }
+}
+
+// Replace all dead blocks with "throw null", and remove unreachable blocks.
+// For blocks with same throws, we use a single canonical throw block.
+static void normalize_dead_blocks(
+    const ControlFlowGraph& callee_orig,
+    const std::unordered_set<cfg::Block*>& dead_blocks,
+    ControlFlowGraph* callee) {
+  // not unordered_map because C++...
+  std::map<std::vector<std::pair<cfg::Block*, DexType*>>, cfg::Block*>
+      canonical_throw_nulls;
+  std::vector<std::pair<Block*, Block*>> old_new_blocks;
+  auto get_key = [](cfg::Block* block) {
+    std::vector<std::pair<cfg::Block*, DexType*>> v;
+    for (auto e : block->get_outgoing_throws_in_order()) {
+      v.emplace_back(e->target(), e->throw_info()->catch_type);
+    }
+    return v;
+  };
+  for (auto block : callee_orig.blocks()) {
+    if (!dead_blocks.count(block)) {
+      continue;
+    }
+    auto callee_block = callee->get_block(block->id());
+    auto first_it = callee_block->get_first_insn();
+    if (first_it != callee_block->end() &&
+        opcode::is_move_result_pseudo(first_it->insn->opcode())) {
+      callee_block = callee->split_block(callee_block, first_it);
+    }
+    auto it = canonical_throw_nulls.find(get_key(block));
+    if (it != canonical_throw_nulls.end()) {
+      old_new_blocks.emplace_back(callee_block, it->second);
+      continue;
+    }
+    auto* const_insn =
+        (new IRInstruction(OPCODE_CONST))->set_dest(0)->set_literal(0);
+    auto* throw_insn = (new IRInstruction(OPCODE_THROW))->set_src(0, 0);
+    callee->push_front(callee_block, {const_insn, throw_insn});
+    canonical_throw_nulls.emplace(get_key(block), callee_block);
+  }
+  callee->replace_blocks(old_new_blocks);
+  callee->remove_unreachable_blocks();
+  if (callee->get_registers_size() == 0) {
+    callee->set_registers_size(1);
+  }
+}
+
+} // namespace
+
+void CFGInliner::inline_cfg(
+    ControlFlowGraph* caller,
+    const InstructionIterator& inline_site,
+    const ControlFlowGraph& callee_orig,
+    size_t next_caller_reg,
+    CFGInlinerPlugin& plugin,
+    const std::unordered_set<cfg::Block*>* dead_blocks) {
   always_assert(&inline_site.cfg() == caller);
 
   // copy the callee because we're going to move its contents into the caller
   ControlFlowGraph callee;
   callee_orig.deep_copy(&callee);
+
+  if (dead_blocks && !dead_blocks->empty()) {
+    normalize_dead_blocks(callee_orig, *dead_blocks, &callee);
+  }
+
+  {
+    auto num = num_interactions(inline_site, callee_orig);
+    for (size_t i = 0; i < num; ++i) {
+      auto sb_factor = get_source_blocks_factor(inline_site, callee_orig, i);
+      if (sb_factor) {
+        normalize_source_blocks(callee, *sb_factor, i);
+      }
+    }
+  }
 
   remove_ghost_exit_block(&callee);
   cleanup_callee_debug(&callee);
@@ -63,10 +208,15 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
   DexPosition* inline_site_dbg_pos =
       inline_after ? nullptr : inline_site.cfg().get_dbg_pos(inline_site);
 
+  if (plugin.update_before_reg_remap(caller, &callee)) {
+    next_caller_reg = caller->get_registers_size();
+  }
+
   // make the invoke last of its block or first based on inline_after
-  Block* split_on_inline = inline_after
-                               ? maybe_split_block(caller, inline_site)
-                               : maybe_split_block_before(caller, inline_site);
+  auto split = inline_after ? maybe_split_block(caller, inline_site)
+                            : maybe_split_block_before(caller, inline_site);
+  Block* split_on_inline = split.first;
+  Block* callsite_blk = split.second;
   TRACE(CFG, 3, "split caller %s : %s", inline_after ? "after" : "before",
         SHOW(*caller));
 
@@ -80,16 +230,14 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
     // ensure that the caller's code after the inlined method retain their
     // original position
     const auto& first = split_on_inline->begin();
-    if (first == split_on_inline->end() || first->type != MFLOW_POSITION) {
+    // inserting debug insn before param load insn does not work
+    if (split_on_inline != inline_site.cfg().entry_block() &&
+        (first == split_on_inline->end() || first->type != MFLOW_POSITION)) {
       // but don't add if there's already a position at the front of this
       // block
       split_on_inline->m_entries.push_front(*(new MethodItemEntry(
           std::make_unique<DexPosition>(*inline_site_dbg_pos))));
     }
-  }
-
-  if (plugin.update_before_reg_remap(caller, &callee)) {
-    next_caller_reg = caller->get_registers_size();
   }
 
   // make sure the callee's registers don't overlap with the caller's
@@ -121,11 +269,10 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
   TRACE(CFG, 3, "callee after remap %s", SHOW(callee));
 
   bool need_reg_size_recompute = plugin.update_after_reg_remap(caller, &callee);
-
   // redirect to callee
   const std::vector<Block*> callee_blocks = callee.blocks();
-  steal_contents(caller, inline_site.block(), &callee);
-  connect_cfgs(inline_after, caller, inline_site.block(), callee_blocks,
+  steal_contents(caller, callsite_blk, &callee);
+  connect_cfgs(inline_after, caller, callsite_blk, callee_blocks,
                callee_entry_block, callee_return_blocks, split_on_inline);
   if (need_reg_size_recompute) {
     caller->recompute_registers_size();
@@ -167,10 +314,11 @@ void CFGInliner::remove_ghost_exit_block(ControlFlowGraph* cfg) {
 
 /*
  * If it isn't already, make `it` the last instruction of its block
- * return the block that should be run after the callee
+ * return the block that should be run after the callee and blk containing
+ * callsite as a pair.
  */
-Block* CFGInliner::maybe_split_block(ControlFlowGraph* caller,
-                                     const InstructionIterator& it) {
+std::pair<Block*, Block*> CFGInliner::maybe_split_block(
+    ControlFlowGraph* caller, const InstructionIterator& it) {
   always_assert(caller->editable());
   always_assert(!it.block()->empty());
 
@@ -184,28 +332,34 @@ Block* CFGInliner::maybe_split_block(ControlFlowGraph* caller,
   // No need to change the code, just return the next block
   Block* goto_block = old_block->goes_to();
   always_assert(goto_block != nullptr);
-  return goto_block;
+  return std::make_pair(goto_block, old_block);
 }
 
 // Insert a new block if needed to make `it` the first instruction of a block.
-Block* CFGInliner::maybe_split_block_before(ControlFlowGraph* caller,
-                                            const InstructionIterator& it) {
+// return the block that should be run before the callee and the block that
+// should contain the callsite as a pair.
+std::pair<Block*, Block*> CFGInliner::maybe_split_block_before(
+    ControlFlowGraph* caller, const InstructionIterator& it) {
   always_assert(caller->editable());
   always_assert(!it.block()->empty());
 
   const IRList::iterator& raw_it = it.unwrap();
   Block* old_block = it.block();
-  if (raw_it == old_block->get_first_insn()) {
-    // Insertion point is already the first instruction, so return its block
-    return old_block;
+  auto preds = old_block->preds();
+  if (raw_it == old_block->get_first_insn() && preds.size() == 1) {
+    Block* single_pred_block = preds.at(0)->src();
+    if (single_pred_block->succs().size() == 1) {
+      // If we already have a block.
+      return std::make_pair(single_pred_block, old_block);
+    }
   }
-  // Else inject an instruction and then split so 'it' is first of block
+
+  // Inject an instruction and then split so 'it' is first of block
   auto dummy_end_instruction = new IRInstruction(OPCODE_NOP);
   caller->insert_before(it, dummy_end_instruction);
-  caller->split_block(caller->find_insn(dummy_end_instruction, old_block));
-  Block* goto_block = old_block->goes_to();
-  always_assert(goto_block != nullptr);
-  return goto_block;
+  auto new_blk = caller->split_block(
+      old_block, caller->find_insn(dummy_end_instruction).unwrap());
+  return std::make_pair(old_block, new_blk);
 }
 
 /*
@@ -269,7 +423,7 @@ void CFGInliner::connect_cfgs(bool inline_after,
 
   auto connect = [&cfg](const std::vector<Block*>& preds, Block* succ) {
     for (Block* pred : preds) {
-      TRACE(CFG, 4, "connecting %d, %d in %s", pred->id(), succ->id(),
+      TRACE(CFG, 4, "connecting %zu, %zu in %s", pred->id(), succ->id(),
             SHOW(*cfg));
       cfg->add_edge(pred, succ, EDGE_GOTO);
     }
@@ -281,16 +435,18 @@ void CFGInliner::connect_cfgs(bool inline_after,
         callsite, [](const Edge* e) { return e->type() == EDGE_GOTO; });
     connect({callsite}, callee_entry);
   } else {
-    std::vector<Block*> callsite_split_preds;
-    for (auto e : callsite_split->preds()) {
-      callsite_split_preds.push_back(e->src());
-    }
-    connect(callsite_split_preds, callee_entry);
     // Remove the preds into callsite, having moved them to entry
-    cfg->delete_pred_edges(callsite_split);
+    cfg->delete_succ_edges(callsite_split);
+    connect({callsite_split}, callee_entry);
   }
   // TODO: tail call optimization (if callsite_split is a return & inline_after)
-  connect(callee_exits, callsite_split);
+
+  if (inline_after) {
+    connect(callee_exits, callsite_split);
+  } else {
+    cfg->delete_pred_edges(callsite);
+    connect(callee_exits, callsite);
+  }
 }
 
 /*

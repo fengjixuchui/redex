@@ -21,21 +21,25 @@ class CFGInliner {
    * Expects callsite to be a method call from caller.
    * Registers starting with next_caller_reg must be available.
    */
-  static void inline_cfg(ControlFlowGraph* caller,
-                         const cfg::InstructionIterator& callsite,
-                         const ControlFlowGraph& callee,
-                         size_t next_caller_reg);
+  static void inline_cfg(
+      ControlFlowGraph* caller,
+      const cfg::InstructionIterator& callsite,
+      const ControlFlowGraph& callee,
+      size_t next_caller_reg,
+      const std::unordered_set<cfg::Block*>* dead_blocks = nullptr);
 
   /*
    * Copy callee's blocks into caller:
    * Uses provided plugin to update caller and/or copy of callee
    */
-  static void inline_cfg(ControlFlowGraph* caller,
-                         const cfg::InstructionIterator& inline_site,
-                         const ControlFlowGraph& callee,
+  static void inline_cfg(
+      ControlFlowGraph* caller,
+      const cfg::InstructionIterator& inline_site,
+      const ControlFlowGraph& callee,
 
-                         size_t next_caller_reg,
-                         CFGInlinerPlugin& plugin);
+      size_t next_caller_reg,
+      CFGInlinerPlugin& plugin,
+      const std::unordered_set<cfg::Block*>* dead_blocks = nullptr);
 
  private:
   /*
@@ -54,14 +58,14 @@ class CFGInliner {
   /*
    * If `it` isn't already, make it the last instruction of its block
    */
-  static Block* maybe_split_block(ControlFlowGraph* caller,
-                                  const InstructionIterator& it);
+  static std::pair<Block*, Block*> maybe_split_block(
+      ControlFlowGraph* caller, const InstructionIterator& it);
 
   /*
    * If `it` isn't first, make it the first instruction of its block
    */
-  static Block* maybe_split_block_before(ControlFlowGraph* caller,
-                                         const InstructionIterator& it);
+  static std::pair<Block*, Block*> maybe_split_block_before(
+      ControlFlowGraph* caller, const InstructionIterator& it);
 
   /*
    * Change the register numbers to not overlap with caller.

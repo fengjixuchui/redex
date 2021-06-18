@@ -412,28 +412,54 @@ std::unique_ptr<DexPosition> position_from_s_expr(
 std::unique_ptr<SourceBlock> source_block_from_s_expr(const s_expr& e) {
   std::string method_str;
   std::string id_str;
-  std::string val_str;
-  s_expr parent_expr;
+  s_expr val_expr;
   s_patn(
       {
           s_patn(&method_str),
           s_patn(&id_str),
-          s_patn(&val_str),
       },
-      parent_expr)
-      .must_match(e, "Expected 3 args for src_block directive");
+      val_expr)
+      .must_match(e, "Expected 2+ args for src_block directive");
   auto* method = DexMethod::make_method(method_str);
   uint32_t id;
   {
     std::istringstream in(id_str);
     in >> id;
   }
-  float val;
-  {
-    std::istringstream in(val_str);
-    in >> val;
+  std::vector<SourceBlock::Val> vals;
+  s_expr tail;
+  for (; !val_expr.is_nil(); val_expr = tail) {
+    s_expr head;
+    s_patn({s_patn(head)}, tail)
+        .must_match(val_expr, "Expected 3rd and 4th arg to be a value string");
+    redex_assert(head.is_list() || head.is_nil());
+    if (head.is_nil()) {
+      break; // Should only happen first loop.
+    }
+    if (head.size() == 0) {
+      vals.emplace_back(SourceBlock::Val::none());
+    } else {
+      std::string val_str;
+      std::string appear_str;
+      s_patn({
+                 s_patn(&val_str),
+                 s_patn(&appear_str),
+             })
+          .must_match(head, "Expected pair");
+      float val;
+      {
+        std::istringstream in(val_str);
+        in >> val;
+      }
+      float appear;
+      {
+        std::istringstream in(appear_str);
+        in >> appear;
+      }
+      vals.emplace_back(val, appear);
+    }
   }
-  return std::make_unique<SourceBlock>(method, id, val);
+  return std::make_unique<SourceBlock>(method, id, vals);
 }
 
 /*
@@ -597,7 +623,7 @@ s_expr create_dbg_expr(const MethodItemEntry* mie) {
   }
   default:
     always_assert_log(DBG_FIRST_SPECIAL <= op && op <= DBG_LAST_SPECIAL,
-                      "Special opcode (%d) is out of range");
+                      "Special opcode (%d) is out of range", op);
     result.emplace_back("EMIT");
     result.emplace_back(std::to_string(dbg->opcode()));
     break;
@@ -612,7 +638,18 @@ s_expr create_source_block_expr(const MethodItemEntry* mie) {
 
   result.emplace_back(s_expr(show(src->src)));
   result.emplace_back(std::to_string(src->id));
-  result.emplace_back(std::to_string(src->val));
+
+  std::vector<s_expr> vals;
+  for (const auto& val : src->vals) {
+    if (val) {
+      vals.emplace_back(
+          std::vector<s_expr>{s_expr(std::to_string(val->val)),
+                              s_expr(std::to_string(val->appear100))});
+    } else {
+      vals.emplace_back(s_expr());
+    }
+  }
+  result.emplace_back(std::move(vals));
 
   return s_expr(result);
 }
@@ -715,7 +752,7 @@ s_expr to_s_expr(const IRCode* code) {
         always_assert(branch_target->type == BRANCH_SIMPLE);
         always_assert_log(
             label_strs.size() == 1,
-            "Expecting 1 label string, actually have %d. code:\n%s",
+            "Expecting 1 label string, actually have %zu. code:\n%s",
             label_strs.size(),
             SHOW(code));
         const s_expr& label = s_expr({s_expr(label_strs[0])});
@@ -759,7 +796,8 @@ std::unique_ptr<IRCode> ircode_from_s_expr(const s_expr& e) {
   auto code = std::make_unique<IRCode>();
   bool matched = s_patn({}, insns_expr).match_with(e);
   always_assert(matched);
-  always_assert_log(insns_expr.size() > 0, "Empty instruction list?! %s");
+  always_assert_log(insns_expr.size() > 0, "Empty instruction list?! %s",
+                    e.str().c_str());
   LabelDefs label_defs;
   LabelRefs label_refs;
   boost::optional<reg_t> max_reg;

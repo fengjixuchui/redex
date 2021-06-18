@@ -14,12 +14,13 @@ class LogcatSymbolicator(object):
 
     TRACE_REGEX = re.compile(
         r"^(?P<prefix>.*)\s+at (?P<class>[A-Za-z][0-9A-Za-z_$]*\.[0-9A-Za-z_$.]+)"
-        r"\.(?P<method>[0-9A-Za-z_$<>]+)\((Unknown Source)?:(?P<lineno>\d+)\)\s*\n",
+        r"\.(?P<method>[0-9A-Za-z_$<>]+)\(((Unknown Source)?:(?P<lineno>\d+))?\)\s*\n",
         re.MULTILINE,
     )
 
     def __init__(self, symbol_maps):
         self.symbol_maps = symbol_maps
+        self.pending_switches = []
 
     def class_replacer(self, matchobj):
         m = matchobj.group(0)
@@ -27,7 +28,49 @@ class LogcatSymbolicator(object):
             return self.symbol_maps.class_map[m].origin_class
         return m
 
+    def find_case_positions(self, start, pattern_id):
+        count_positions = self.symbol_maps.line_map.get_stack(start)
+        assert len(count_positions) == 1
+        assert count_positions[0].method == "redex.$Position.count"
+        # The cases are stored in the immediately following lines,
+        # and are ordered by pattern-id, so we can do a binary search.
+        end = start + count_positions[0].line
+        start = start + 1
+        while start <= end:
+            middle = (start + end) // 2
+            case_positions = self.symbol_maps.line_map.get_stack(middle)
+            assert len(case_positions) >= 1
+            assert case_positions[0].method == "redex.$Position.case"
+            if case_positions[0].line == pattern_id:
+                case_positions.pop(0)
+                return case_positions
+            elif case_positions[0].line < pattern_id:
+                start = middle + 1
+            else:
+                end = middle - 1
+        return None
+
+    # If there's no debug info item, stack traces have no line number e.g.
+    #   at X.OPu.A04()
+    # Just deobfuscate the class/method name
+    def line_replacer_no_lineno(self, matchobj):
+        class_name = matchobj.group("class")
+        method_name = matchobj.group("method")
+        if class_name in self.symbol_maps.class_map:
+            class_map = self.symbol_maps.class_map[class_name]
+            deobf_class_name = class_map.origin_class
+            deobf_method_name = class_map.method_mapping[method_name]
+            return "%s\tat %s.%s()\n" % (
+                matchobj.group("prefix"),
+                deobf_class_name,
+                deobf_method_name,
+            )
+        return matchobj.string
+
     def line_replacer(self, matchobj):
+        if not matchobj.group("lineno"):
+            return self.line_replacer_no_lineno(matchobj)
+
         lineno = int(matchobj.group("lineno"))
         cls = matchobj.group("class")
         if self.symbol_maps.iodi_metadata is not None:
@@ -42,8 +85,26 @@ class LogcatSymbolicator(object):
         if cls in self.symbol_maps.class_map:
             cls = self.symbol_maps.class_map[cls]
         result = ""
-        for pos in positions:
-            if pos.method is None:
+        while positions:
+            pos = positions.pop(0)
+            if pos.method == "redex.$Position.switch":
+                self.pending_switches.append(
+                    {"prefix": matchobj.group("prefix"), "line": pos.line}
+                )
+            elif pos.method == "redex.$Position.pattern":
+                pattern_id = pos.line
+                if self.pending_switches:
+                    ps = self.pending_switches.pop()
+                    case_positions = self.find_case_positions(ps["line"], pattern_id)
+                    if case_positions:
+                        case_positions.extend(positions)
+                        positions = case_positions
+                        continue
+                result += "%s\t$(unresolved switch %d)\n" % (
+                    matchobj.group("prefix"),
+                    pattern_id,
+                )
+            elif pos.method is None:
                 result += "%s\tat %s.%s(%s:%d)\n" % (
                     matchobj.group("prefix"),
                     cls,

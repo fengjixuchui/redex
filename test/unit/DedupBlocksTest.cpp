@@ -11,35 +11,18 @@
 
 #include "ControlFlow.h"
 #include "Creators.h"
-#include "DedupBlocksPass.h"
+#include "DedupBlocks.h"
 #include "DexAsm.h"
 #include "DexUtil.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "RedexTest.h"
-#include "VirtualScope.h"
+#include "Walkers.h"
 
 struct Branch {
   MethodItemEntry* source;
   MethodItemEntry* target;
 };
-
-void run_passes(const std::vector<Pass*>& passes,
-                std::vector<DexClass*> classes) {
-  std::vector<DexStore> stores;
-  DexMetadata dm;
-  dm.set_id("classes");
-  DexStore store(dm);
-
-  store.add_classes(std::move(classes));
-  stores.emplace_back(std::move(store));
-  PassManager manager(passes);
-  manager.set_testing_mode();
-
-  Json::Value conf_obj = Json::nullValue;
-  ConfigFiles dummy_config(conf_obj);
-  manager.run_passes(stores, dummy_config);
-}
 
 struct DedupBlocksTest : public RedexTest {
   DexClass* m_class;
@@ -67,10 +50,17 @@ struct DedupBlocksTest : public RedexTest {
     return method;
   }
 
-  void run_dedup_blocks() {
-    std::vector<Pass*> passes = {new DedupBlocksPass()};
-    std::vector<DexClass*> classes = {m_class};
-    run_passes(passes, std::move(classes));
+  void run_dedup_blocks(bool dedup_throws = true) {
+    walk::code(std::vector<DexClass*>{m_class},
+               [&](DexMethod* method, IRCode& code) {
+                 code.build_cfg(/* editable */ true);
+                 auto& cfg = code.cfg();
+                 dedup_blocks_impl::Config config;
+                 config.dedup_throws = dedup_throws;
+                 dedup_blocks_impl::DedupBlocks impl(&config, method);
+                 impl.run();
+                 code.clear_cfg();
+               });
   }
 
   ~DedupBlocksTest() {}
@@ -1074,7 +1064,7 @@ TEST_F(DedupBlocksTest, conditional_hashed_alike) {
   method->set_code(std::move(input_code));
   auto code = method->get_code();
 
-  run_dedup_blocks();
+  run_dedup_blocks(/* dedup_throws */ true);
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -1142,4 +1132,105 @@ TEST_F(DedupBlocksTest, conditional_hashed_not_alike) {
   )");
 
   EXPECT_CODE_EQ(expected_code.get(), code);
+}
+
+// When dedup-throws option is off, don't dedup throws
+TEST_F(DedupBlocksTest, dont_dedup_throws) {
+  auto input_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :a)
+      (goto :b)
+      (:a)
+      (throw v0)
+      (:b)
+      (throw v0)
+    )
+  )");
+  auto method = get_fresh_method("dont_dedup_throws");
+  method->set_code(std::move(input_code));
+  auto code = method->get_code();
+
+  run_dedup_blocks(/* dedup_throws */ false);
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :a)
+      (throw v0)
+      (:a)
+      (throw v0)
+    )
+  )");
+
+  EXPECT_CODE_EQ(expected_code.get(), code);
+}
+
+TEST_F(DedupBlocksTest, retainPositionWhenMayThrow) {
+  using namespace dex_asm;
+  DexMethod* method = get_fresh_method("postfixSwitchCase");
+
+  auto str = R"(
+    (
+      (.pos:dbg_0 "LFoo;.caller:()V" "Foo.java" 10)
+      (const v0 0)
+      (const v1 1)
+      (switch v0 (:a :b :c))
+
+      (:a 0)
+      (return v0)
+
+      (:b 1)
+      (const v1 1)
+      (invoke-static () "LMay;.throw:()V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v1)
+
+      (:c 2)
+      (.pos:dbg_1 "LFoo;.caller:()V" "Foo.java" 20)
+      (const v0 0)
+      (invoke-static () "LMay;.throw:()V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v1)
+    )
+  )";
+
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+
+  run_dedup_blocks();
+
+  auto expected_str = R"(
+    (
+      (.pos:dbg_0 "LFoo;.caller:()V" "Foo.java" 10)
+      (const v0 0)
+      (const v1 1)
+      (switch v0 (:a :b :c))
+
+      (:a 0)
+      (return v0)
+
+      (:c 2)
+      (.pos:dbg_1 "LFoo;.caller:()V" "Foo.java" 20)
+      (const v0 0)
+      (goto :d)
+
+      (:b 1)
+      (.pos:dbg_0 "LFoo;.caller:()V" "Foo.java" 10)
+      (const v1 1)
+
+      (:d)
+      (invoke-static () "LMay;.throw:()V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v1)
+    )
+  )";
+  auto expected_code = assembler::ircode_from_string(expected_str);
+  EXPECT_CODE_EQ(expected_code.get(), method->get_code());
 }

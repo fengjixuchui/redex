@@ -1,7 +1,7 @@
 include $(top_srcdir)/Makefile.inc
 include $(top_srcdir)/test/Makefile.inc
 
-AM_CXXFLAGS = --std=gnu++14
+AM_CXXFLAGS = --std=gnu++17
 AM_CPPFLAGS = $(COMMON_INCLUDES) $(COMMON_TEST_INCLUDES)
 
 LDADD = $(COMMON_TEST_LIBS)
@@ -21,6 +21,7 @@ check_PROGRAMS = \
     branch_prefix_hoisting_test \
     cfg_inliner_test \
     cfg_mutation_test \
+    cfg_positions_test \
     check_breadcrumbs_test \
     check_cast_analysis_test \
     concurrent_containers_test \
@@ -54,6 +55,7 @@ check_PROGRAMS = \
     global_type_analysis_test \
     graph_util_test \
     hierarchy_util_test \
+    instruction_sequence_outliner_test \
     interprocedural_constant_propagation_test \
     intraprocedural_constant_propagation_test \
     ir_assembler_test \
@@ -75,6 +77,8 @@ check_PROGRAMS = \
     monitor_count_test \
     mutf8_compare_test \
     leb_test \
+    native_test \
+    native_names_test \
     null_propagation_test \
     object_inliner_test \
     object_propagation_test \
@@ -82,6 +86,7 @@ check_PROGRAMS = \
     outliner_type_analysis_test \
     partial_pass_test \
     peephole_test \
+    print_kotlin_stats_test \
     proguard_lexer_test \
     proguard_map_test \
     proguard_parser_test \
@@ -90,6 +95,7 @@ check_PROGRAMS = \
     random_forest_test \
     reaching_definitions_test \
     reduce_array_literals_test \
+    reduce_boolean_branches_test \
     reduce_gotos_test \
     reflection_analysis_test \
     reg_alloc_test \
@@ -107,10 +113,12 @@ check_PROGRAMS = \
     result_propagation_test \
     side_effects_summary_test \
     signed_constant_propagation_test \
+    source_blocks_test \
     split_huge_switch_test \
     static_relo_v2_test \
     strip_debug_info_test \
     switch_dispatch_test \
+    timer_test \
     trace_multithreading_test \
     true_virtuals_test \
     type_analysis_transform_test \
@@ -146,6 +154,9 @@ cfg_inliner_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 cfg_mutation_test_SOURCES = CFGMutationTest.cpp
 cfg_mutation_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+cfg_positions_test_SOURCES = CFGPositionsTest.cpp
+cfg_positions_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 check_breadcrumbs_test_SOURCES = CheckBreadCrumbsTest.cpp
 
@@ -217,6 +228,8 @@ graph_util_test_SOURCES = GraphUtilTest.cpp
 hierarchy_util_test_SOURCES = HierarchyUtilTest.cpp
 hierarchy_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
+instruction_sequence_outliner_test_SOURCES = InstructionSequenceOutlinerTest.cpp ScopeHelper.cpp
+
 interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConstantPropagationTest.cpp
 
 intraprocedural_constant_propagation_test_SOURCES = constant-propagation/ConstantPropagationTest.cpp
@@ -266,6 +279,10 @@ mutf8_compare_test_SOURCES = Mutf8CompareTest.cpp
 
 leb_test_SOURCES = LebTest.cpp
 
+native_test_SOURCES = NativeTest.cpp
+
+native_names_test_SOURCES = NativeNamesTest.cpp
+
 null_propagation_test_SOURCES = constant-propagation/NullPropagationTest.cpp
 
 object_inliner_test_SOURCES = ObjectInlinerTest.cpp
@@ -282,6 +299,8 @@ outliner_type_analysis_test_SOURCES = OutlinerTypeAnalysisTest.cpp
 partial_pass_test_SOURCES = PartialPassTest.cpp
 
 peephole_test_SOURCES = PeepholeTest.cpp
+
+print_kotlin_stats_test_SOURCES = PrintKotlinStatsTest.cpp
 
 proguard_lexer_test_SOURCES = ProguardLexerTest.cpp
 
@@ -301,6 +320,9 @@ reaching_definitions_test_SOURCES = ReachingDefinitionsTest.cpp
 
 reduce_array_literals_test_SOURCES = ReduceArrayLiteralsTest.cpp
 reduce_array_literals_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+reduce_boolean_branches_test_SOURCES = ReduceBooleanBranchesTest.cpp VirtScopeHelper.cpp ScopeHelper.cpp
+reduce_boolean_branches_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 reduce_gotos_test_SOURCES = ReduceGotosTest.cpp
 reduce_gotos_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
@@ -344,6 +366,8 @@ side_effects_summary_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 signed_constant_propagation_test_SOURCES = constant-propagation/SignedConstantPropagationTest.cpp
 signed_constant_propagation_test_CPPFLAGS = $(COMMON_INCLUDES) $(COMMON_TEST_INCLUDES) -I$(top_srcdir)/sparta/test
 
+source_blocks_test_SOURCES = SourceBlocksTest.cpp
+
 split_huge_switch_test_SOURCES = SplitHugeSwitchTest.cpp
 
 static_relo_v2_test_SOURCES = StaticReloV2Test.cpp
@@ -356,6 +380,8 @@ switch_dispatch_test_SOURCES = SwitchDispatchTest.cpp
 
 # throw_propagation_test_SOURCES = ThrowPropagationTest.cpp
 # throw_propagation_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+timer_test_SOURCES = TimerTest.cpp
 
 trace_multithreading_test_SOURCES = TraceMultithreadingTest.cpp
 trace_multithreading_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
@@ -405,6 +431,7 @@ TESTS = \
     branch_prefix_hoisting_test \
     cfg_inliner_test \
     cfg_mutation_test \
+    cfg_positions_test \
     check_breadcrumbs_test \
     check_cast_analysis_test \
     concurrent_containers_test \
@@ -437,6 +464,7 @@ TESTS = \
     global_type_analysis_test \
     graph_util_test \
     hierarchy_util_test \
+    instruction_sequence_outliner_test \
     interprocedural_constant_propagation_test \
     intraprocedural_constant_propagation_test \
     ir_assembler_test \
@@ -465,6 +493,7 @@ TESTS = \
     outliner_type_analysis_test \
     partial_pass_test \
     peephole_test \
+    print_kotlin_stats_test \
     proguard_lexer_test \
     proguard_map_test \
     proguard_parser_test \
@@ -473,6 +502,7 @@ TESTS = \
     random_forest_test \
     reaching_definitions_test \
     reduce_array_literals_test \
+    reduce_boolean_branches_test \
     reduce_gotos_test \
     reflection_analysis_test \
     reg_alloc_test \
@@ -490,10 +520,12 @@ TESTS = \
     result_propagation_test \
     side_effects_summary_test \
     signed_constant_propagation_test \
+    source_blocks_test \
     split_huge_switch_test \
     static_relo_v2_test \
     strip_debug_info_test \
     switch_dispatch_test \
+    timer_test \
     trace_multithreading_test \
     true_virtuals_test \
     type_analysis_transform_test \

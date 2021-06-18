@@ -99,19 +99,26 @@ TEST_F(EvaluateTypeChecksTest, same_type) {
 TEST_F(EvaluateTypeChecksTest, external_external) {
   auto obj = java_lang_Object();
   auto str = java_lang_String();
+  auto cls = java_lang_Class();
+
+  // Object is special.
+  EXPECT_EQ(1, evaluate(str, obj));
 
   // For now, we expect this to not be resolved.
   EXPECT_EQ(-1, evaluate(obj, str));
-  EXPECT_EQ(-1, evaluate(str, obj));
+  EXPECT_EQ(-1, evaluate(str, cls));
+  EXPECT_EQ(-1, evaluate(cls, str));
 }
 
 TEST_F(EvaluateTypeChecksTest, external_internal) {
   auto obj = java_lang_Object();
   auto str = java_lang_String();
 
+  // Object is special.
+  EXPECT_EQ(1, evaluate(m_foo, obj));
+
   // For now, we expect this to not be resolved.
   EXPECT_EQ(-1, evaluate(obj, m_foo));
-  EXPECT_EQ(-1, evaluate(m_foo, obj));
   EXPECT_EQ(-1, evaluate(str, m_foo));
   EXPECT_EQ(-1, evaluate(m_foo, str));
 }
@@ -283,7 +290,7 @@ TEST_F(EvaluateTypeChecksTest,
         (move-result-pseudo v0)
 
         (move v1 v0)
-        (move v2 v0)
+        (xor-int/lit8 v2 v0 1)
 
         (if-nez v1 :L1)
         (const v0 0)
@@ -297,6 +304,67 @@ TEST_F(EvaluateTypeChecksTest,
   auto method_str = "method (private static) \"LTest;.test:(LBaz;)I\"";
 
   EXPECT_TRUE(run("LTest;", method_str, code, code));
+}
+
+TEST_F(EvaluateTypeChecksTest,
+       instance_of_optimize_always_succeed_nez_multi_use_yes) {
+  auto code = R"(
+       (
+        (load-param-object v0)
+        (load-param-object v1)
+        (instance-of v0 "LFoo;")
+        (move-result-pseudo v2)
+
+        (move v3 v2)
+
+        (if-nez v1 :L1)
+
+        (if-nez v3 :L0)
+        (const v0 0)
+        (return v0)
+
+        (:L0)
+        (const v0 1)
+        (return v0)
+
+        (:L1)
+        (if-eqz v2 :L2)
+        (const v0 2)
+        (return v0)
+
+        (:L2)
+        (const v0 3)
+        (return v0)
+       )
+      )";
+  auto method_str = "method (private static) \"LTest;.test:(LBaz;I)I\"";
+
+  auto expected = R"(
+      (
+       (load-param-object v0)
+       (load-param-object v1)
+
+       (if-nez v1 :L1)
+
+       (if-nez v0 :L0)
+       (const v0 0)
+       (return v0)
+
+       (:L0)
+       (const v0 1)
+       (return v0)
+
+       (:L1)
+       (if-eqz v0 :L2)
+       (const v0 2)
+       (return v0)
+
+       (:L2)
+       (const v0 3)
+       (return v0)
+      )
+     )";
+  EXPECT_TRUE(run("LTest;", method_str, code, expected));
 }
 
 TEST_F(EvaluateTypeChecksTest,

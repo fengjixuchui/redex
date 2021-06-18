@@ -14,7 +14,9 @@
 
 namespace {
 const char* METRIC_BLOCKS_REMOVED = "blocks_removed";
+const char* METRIC_INSNS_REMOVED = "insns_removed";
 const char* METRIC_BLOCKS_SPLIT = "blocks_split";
+const char* METRIC_POSITIONS_INSERTED = "positions_inserted";
 const char* METRIC_ELIGIBLE_BLOCKS = "eligible_blocks";
 } // namespace
 
@@ -54,16 +56,20 @@ void DedupBlocksPass::report_stats(PassManager& mgr,
                                    const dedup_blocks_impl::Stats& stats) {
   int eligible_blocks = stats.eligible_blocks;
   int removed = stats.blocks_removed;
+  int insns_removed = stats.insns_removed;
   int split = stats.blocks_split;
+  int positions_inserted = stats.positions_inserted;
   mgr.incr_metric(METRIC_ELIGIBLE_BLOCKS, eligible_blocks);
   mgr.incr_metric(METRIC_BLOCKS_REMOVED, removed);
+  mgr.incr_metric(METRIC_INSNS_REMOVED, insns_removed);
   mgr.incr_metric(METRIC_BLOCKS_SPLIT, split);
+  mgr.incr_metric(METRIC_POSITIONS_INSERTED, positions_inserted);
   TRACE(DEDUP_BLOCKS, 2, "%d eligible_blocks", eligible_blocks);
 
   for (const auto& entry : stats.dup_sizes) {
     TRACE(DEDUP_BLOCKS,
           2,
-          "found %d duplicate blocks with %d instructions",
+          "found %zu duplicate blocks with %zu instructions",
           entry.second,
           entry.first);
   }

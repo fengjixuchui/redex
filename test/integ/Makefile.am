@@ -1,7 +1,7 @@
 include $(top_srcdir)/Makefile.inc
 include $(top_srcdir)/test/Makefile.inc
 
-AM_CXXFLAGS = --std=gnu++14
+AM_CXXFLAGS = --std=gnu++17
 AM_CPPFLAGS = $(COMMON_INCLUDES) $(COMMON_TEST_INCLUDES)
 
 LDADD = $(COMMON_MOCK_TEST_LIBS)
@@ -14,7 +14,6 @@ AM_LOG_FLAGS = -c 'dexfile=$0-class.dex $0'
 check_PROGRAMS = \
     ab_experiment_context_test \
     call_graph_test \
-    class_init_counter_test \
     clinit_side_effect_test \
     constant_propagation_test \
     constructor_dedup_test_test \
@@ -22,6 +21,7 @@ check_PROGRAMS = \
     dedup_blocks_test \
     dedup_vmethods_test \
     default_annotation_test \
+    dex_output_test \
     final_inline_analysis_test \
     global_type_analysis_test \
     instruction_sequence_outliner_test \
@@ -51,9 +51,6 @@ EXTRA_ab_experiment_context_test_DEPENDENCIES = ab_experiment_context_test-class
 call_graph_test_SOURCES = CallGraphTest.cpp
 EXTRA_call_graph_test_DEPENDENCIES = call_graph_test-class.dex
 
-class_init_counter_test_SOURCES = ClassInitCounterTest.cpp
-EXTRA_class_init_counter_test_DEPENDENCIES = class_init_counter_test-class.dex
-
 clinit_side_effect_test_SOURCES = ClinitSideEffect.cpp
 EXTRA_clinit_side_effect_test_DEPENDENCIES = clinit_side_effect_test-class.dex
 
@@ -74,6 +71,9 @@ EXTRA_dedup_vmethods_test_DEPENDENCIES = dedup_vmethods_test-class.dex
 
 default_annotation_test_SOURCES = DefaultAnnotation.cpp
 EXTRA_default_annotation_test_DEPENDENCIES = default_annotation_test-class.dex
+
+dex_output_test_SOURCES = DexOutputTest.cpp
+EXTRA_dex_output_test_DEPENDENCIES = dex_output_test-class.dex
 
 final_inline_analysis_test_SOURCES = FinalInlineAnalysisTest.cpp
 EXTRA_final_inline_analysis_test_DEPENDENCIES = final_inline_analysis_test-class.dex
@@ -158,9 +158,6 @@ ab_experiment_context_test-class.jar: ABExperimentContextTest.java
 call_graph_test-class.jar: CallGraphTest.java
 	$(create_jar)
 
-class_init_counter_test-class.jar: ClassInitHierarchy.java
-	$(create_jar)
-
 clinit_side_effect_test-class.jar: ClinitSideEffect.java
 	$(create_jar)
 
@@ -180,6 +177,9 @@ dedup_vmethods_test-class.jar: DedupVirtualMethodsTest.java
 	$(create_jar)
 
 default_annotation_test-class.jar: DefaultAnnotationTest.java
+	$(create_jar)
+
+dex_output_test-class.jar: DexOutputTest.java
 	$(create_jar)
 
 final_inline_analysis_test-class.jar: FinalInlineAnalysisTest.java

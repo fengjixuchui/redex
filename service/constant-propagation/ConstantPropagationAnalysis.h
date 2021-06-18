@@ -194,9 +194,7 @@ struct EnumFieldAnalyzerState {
 
   EnumFieldAnalyzerState()
       : enum_equals(static_cast<DexMethod*>(DexMethod::get_method(
-            "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z"))) {
-    always_assert(enum_equals);
-  }
+            "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z"))) {}
 };
 
 /*
@@ -252,9 +250,15 @@ struct ImmutableAttributeAnalyzerState {
     }
   };
 
+  struct CachedBoxedObjects {
+    long begin;
+    long end;
+  };
+
   ConcurrentMap<DexMethod*, std::vector<Initializer>> method_initializers;
   ConcurrentSet<DexMethod*> attribute_methods;
   ConcurrentSet<DexField*> attribute_fields;
+  std::unordered_map<DexMethod*, CachedBoxedObjects> cached_boxed_objects;
 
   ImmutableAttributeAnalyzerState();
 
@@ -262,6 +266,12 @@ struct ImmutableAttributeAnalyzerState {
   Initializer& add_initializer(DexMethod* initialize_method, DexField* attr);
   Initializer& add_initializer(DexMethod* initialize_method,
                                const ImmutableAttr::Attr& attr);
+  void add_cached_boxed_objects(DexMethod* initialize_method,
+                                long begin,
+                                long end);
+  bool is_jvm_cached_object(DexMethod* initialize_method, long value) const;
+
+  static DexType* initialized_type(const DexMethod* initialize_method);
 };
 
 class ImmutableAttributeAnalyzer final
@@ -379,6 +389,15 @@ class runtime_equals_visitor : public boost::static_visitor<bool> {
     return *d1.get_constant() == *d2.get_constant();
   }
 
+  bool operator()(const ObjectWithImmutAttrDomain& d1,
+                  const ObjectWithImmutAttrDomain& d2) const {
+    if (!(d1.is_value() && d2.is_value())) {
+      return false;
+    }
+    return d1.get_constant()->runtime_equals(*d2.get_constant()) ==
+           TriState::True;
+  }
+
   template <typename Domain, typename OtherDomain>
   bool operator()(const Domain& d1, const OtherDomain& d2) const {
     return false;
@@ -451,5 +470,25 @@ ReturnState collect_return_state(IRCode* code,
  * instruction. A null object would cause an exception to be thrown.
  */
 boost::optional<size_t> get_dereferenced_object_src_index(const IRInstruction*);
+
+/*
+ * Handle reading of static fields fXXX in $EnumUtils class.
+ */
+class EnumUtilsFieldAnalyzer final
+    : public InstructionAnalyzerBase<EnumUtilsFieldAnalyzer,
+                                     ConstantEnvironment,
+                                     ImmutableAttributeAnalyzerState*> {
+ public:
+  static bool analyze_sget(ImmutableAttributeAnalyzerState* state,
+                           const IRInstruction* insn,
+                           ConstantEnvironment* env);
+};
+
+using ConstantPrimitiveAndBoxedAnalyzer =
+    InstructionAnalyzerCombiner<EnumUtilsFieldAnalyzer,
+                                ImmutableAttributeAnalyzer,
+                                EnumFieldAnalyzer,
+                                BoxedBooleanAnalyzer,
+                                PrimitiveAnalyzer>;
 
 } // namespace constant_propagation

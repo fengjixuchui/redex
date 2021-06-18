@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "Macros.h" // For ATTR_FORMAT.
 #include "RedexException.h"
 
 #include <iosfwd>
@@ -63,13 +64,15 @@ extern bool slow_invariants_debug;
                               const char* func,
                               RedexError type,
                               const char* fmt,
-                              ...);
+                              ...) ATTR_FORMAT(6, 7);
 
 #define assert_impl(cond, fail) \
   ((cond) ? static_cast<void>(0) : ((fail), static_cast<void>(0)))
 
+// Note: Using " " and detecting that, so that GCC's `-Wformat-zero-length`
+//       does not apply, which is hard to disable across compilers.
 #define always_assert(e) \
-  assert_impl(e, assert_fail_impl(e, RedexError::GENERIC_ASSERTION_ERROR, ""))
+  assert_impl(e, assert_fail_impl(e, RedexError::GENERIC_ASSERTION_ERROR, " "))
 #define always_assert_log(e, msg, ...) \
   assert_impl(e,                       \
               assert_fail_impl(        \

@@ -95,8 +95,8 @@ class TypeAnaysisAwareClosureMarker final
       const auto& overriding_methods =
           mog::get_overriding_methods(m_method_override_graph, m);
       if (!overriding_methods.empty()) {
-        TRACE(REACH, 3, "root with overrides: %u %s", overriding_methods.size(),
-              SHOW(m));
+        TRACE(REACH, 3, "root with overrides: %zu %s",
+              overriding_methods.size(), SHOW(m));
       }
       for (auto* overriding : overriding_methods) {
         push_cond(overriding);
@@ -224,7 +224,8 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects_with_type_anaysis(
     const IgnoreSets& ignore_sets,
     int* num_ignore_check_strings,
     bool record_reachability,
-    std::shared_ptr<type_analyzer::global::GlobalTypeAnalyzer> gta) {
+    std::shared_ptr<type_analyzer::global::GlobalTypeAnalyzer> gta,
+    bool /*unused*/) {
   Timer t("Marking");
   auto scope = build_class_scope(stores);
   // Rebuild uneditable CFGs.
@@ -247,7 +248,7 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects_with_type_anaysis(
 
   size_t num_threads = redex_parallel::default_num_threads();
   auto stats_arr = std::make_unique<Stats[]>(num_threads);
-  auto work_queue = workqueue_foreach<ReachableObject>(
+  workqueue_run<ReachableObject>(
       [&](MarkWorkerState* worker_state, const ReachableObject& obj) {
         TypeAnaysisAwareClosureMarker transitive_closure_marker(
             ignore_sets, *method_override_graph, record_reachability,
@@ -256,12 +257,9 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects_with_type_anaysis(
         transitive_closure_marker.visit(obj);
         return nullptr;
       },
+      root_set,
       num_threads,
       /*push_tasks_while_running=*/true);
-  for (const auto& obj : root_set) {
-    work_queue.add_item(obj);
-  }
-  work_queue.run_all();
 
   if (num_ignore_check_strings != nullptr) {
     for (size_t i = 0; i < num_threads; ++i) {
@@ -279,16 +277,17 @@ TypeAnalysisAwareRemoveUnreachablePass::compute_reachable_objects(
     const DexStoresVector& stores,
     PassManager& pm,
     int* num_ignore_check_strings,
-    bool emit_graph_this_run) {
+    bool emit_graph_this_run,
+    bool remove_no_argument_constructors) {
   // Fetch analysis result
   auto analysis = pm.template get_preserved_analysis<GlobalTypeAnalysisPass>();
   always_assert(analysis);
   auto gta = analysis->get_result();
   always_assert(gta);
 
-  return compute_reachable_objects_with_type_anaysis(stores, m_ignore_sets,
-                                                     num_ignore_check_strings,
-                                                     emit_graph_this_run, gta);
+  return compute_reachable_objects_with_type_anaysis(
+      stores, m_ignore_sets, num_ignore_check_strings, emit_graph_this_run, gta,
+      remove_no_argument_constructors);
 }
 
 static TypeAnalysisAwareRemoveUnreachablePass s_pass;

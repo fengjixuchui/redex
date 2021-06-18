@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 
 class DexField;
@@ -42,6 +43,8 @@ enum IROpcode : uint16_t {
 // clang-format on
 
 std::string show(IROpcode);
+
+std::ostream& operator<<(std::ostream& os, const IROpcode& op);
 
 using bit_width_t = uint8_t;
 
@@ -170,6 +173,8 @@ IROpcode invoke_for_method(const DexMethod* method);
 IROpcode return_opcode(const DexType* type);
 
 IROpcode load_opcode(const DexType* type);
+
+IROpcode move_opcode(const DexType* type);
 
 IROpcode move_result_to_move(IROpcode);
 

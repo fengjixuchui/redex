@@ -67,6 +67,7 @@
 #include <algorithm>
 #include <list>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -86,6 +87,7 @@
 #include "DexLimits.h"
 #include "DexPosition.h"
 #include "DexUtil.h"
+#include "Dominators.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "InterDexPass.h"
@@ -94,6 +96,7 @@
 #include "Macros.h"
 #include "MethodProfiles.h"
 #include "MutablePriorityQueue.h"
+#include "OutlinedMethods.h"
 #include "OutlinerTypeAnalysis.h"
 #include "PartialCandidates.h"
 #include "PassManager.h"
@@ -101,6 +104,7 @@
 #include "RefChecker.h"
 #include "Resolver.h"
 #include "Show.h"
+#include "SourceBlocks.h"
 #include "StlUtil.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -384,11 +388,10 @@ class CandidateInstructionCoresBuilder {
 // Normalization of partial candidate sequence to candidate sequence
 ////////////////////////////////////////////////////////////////////////////////
 
-using ReachingInitializedsEnvironments =
-    std::unordered_map<const IRInstruction*,
-                       reaching_initializeds::Environment>;
 using LazyReachingInitializedsEnvironments =
-    Lazy<ReachingInitializedsEnvironments>;
+    Lazy<reaching_initializeds::ReachingInitializedsEnvironments>;
+using OptionalReachingInitializedsEnvironments =
+    boost::optional<reaching_initializeds::ReachingInitializedsEnvironments>;
 
 static std::vector<cfg::Edge*> get_ordered_goto_and_branch_succs(
     cfg::Block* block) {
@@ -592,7 +595,7 @@ static bool can_outline_opcode(IROpcode opcode) {
 // indicates whether attempt was successful. If not, then the partial
 // candidate sequence should be abandoned.
 static bool append_to_partial_candidate(
-    LazyReachingInitializedsEnvironments& reaching_initializeds,
+    LazyReachingInitializedsEnvironments& reaching_initialized_new_instances,
     IRInstruction* insn,
     PartialCandidate* pc,
     PartialCandidateNode* pcn) {
@@ -623,7 +626,8 @@ static bool append_to_partial_candidate(
       if (it != pcn->defined_regs.end()) {
         defined_reg = it->second;
       } else {
-        auto initialized = reaching_initializeds->at(insn).get(insn->src(0));
+        auto initialized =
+            reaching_initialized_new_instances->at(insn).get(insn->src(0));
         if (!initialized.get_constant() || !*initialized.get_constant()) {
           return false;
         }
@@ -647,7 +651,145 @@ static bool append_to_partial_candidate(
   return true;
 }
 
+class CanOutlineBlockDecider {
+ private:
+  const Config& m_config;
+  bool m_sufficiently_warm;
+  bool m_sufficiently_hot;
+  mutable std::unique_ptr<LazyUnorderedMap<cfg::Block*, bool>> m_is_in_loop;
+  mutable std::unique_ptr<LazyUnorderedMap<cfg::Block*, boost::optional<float>>>
+      m_max_vals;
+  mutable std::unique_ptr<dominators::SimpleFastDominators<cfg::GraphInterface>>
+      m_dominators;
+
+ public:
+  CanOutlineBlockDecider(const Config& config,
+                         bool sufficiently_warm,
+                         bool sufficiently_hot)
+      : m_config(config),
+        m_sufficiently_warm(sufficiently_warm),
+        m_sufficiently_hot(sufficiently_hot) {}
+
+  enum class Result {
+    CanOutline,
+    BlockExceedsThresholds,
+    WarmLoop,
+    WarmLoopExceedsThresholds,
+    WarmLoopNoSourceBlocks,
+    Hot,
+    HotExceedsThresholds,
+    HotNoSourceBlocks,
+  };
+
+  Result can_outline_from_big_block(
+      const big_blocks::BigBlock& big_block) const {
+    if (!m_sufficiently_hot && !m_sufficiently_warm) {
+      return Result::CanOutline;
+    }
+    if (!m_sufficiently_hot) {
+      always_assert(m_sufficiently_warm);
+      // Make sure m_is_in_loop is initialized
+      if (!m_is_in_loop) {
+        m_is_in_loop.reset(
+            new LazyUnorderedMap<cfg::Block*, bool>([](cfg::Block* block) {
+              std::unordered_set<cfg::Block*> visited;
+              std::queue<cfg::Block*> work_queue;
+              for (auto e : block->succs()) {
+                work_queue.push(e->target());
+              }
+              while (!work_queue.empty()) {
+                auto other_block = work_queue.front();
+                work_queue.pop();
+                if (visited.insert(other_block).second) {
+                  if (block == other_block) {
+                    return true;
+                  }
+                  for (auto e : other_block->succs()) {
+                    work_queue.push(e->target());
+                  }
+                }
+              }
+              return false;
+            }));
+      }
+      if (!(*m_is_in_loop)[big_block.get_first_block()]) {
+        return Result::CanOutline;
+      }
+    }
+    // If we get here,
+    // - the method is hot, or
+    // - the method is not hot but warm, and the big block is in a loop
+    if (m_config.block_profiles_hits < 0) {
+      return m_sufficiently_hot ? Result::Hot : Result::WarmLoop;
+    }
+    // Make sure m_max_vals is initialized
+    if (!m_max_vals) {
+      m_max_vals.reset(
+          new LazyUnorderedMap<cfg::Block*, boost::optional<float>>(
+              [](cfg::Block* block) -> boost::optional<float> {
+                auto* sb = source_blocks::get_first_source_block(block);
+                if (sb == nullptr) {
+                  return boost::none;
+                }
+                boost::optional<float> max_val;
+                size_t num = g_redex->num_sb_interaction_indices();
+                for (size_t i = 0; i < num; i++) {
+                  boost::optional<float> val = sb->get_val(i);
+                  if (!max_val || (val && *val > *max_val)) {
+                    max_val = val;
+                  }
+                }
+                return max_val;
+              }));
+    }
+    // Via m_max_vals, we consider the maximum hit number for each block.
+    // Across all blocks, we are gathering the *minimum* of those hit numbers.
+    boost::optional<float> min_val;
+    for (auto block : big_block.get_blocks()) {
+      auto val = (*m_max_vals)[block];
+      if (!min_val || (val && *val < *min_val)) {
+        min_val = val;
+        if (min_val && *min_val == 0) {
+          break;
+        }
+      }
+    }
+    // Let's also look back at dominators. It's beneficial if we can tighten the
+    // minimum.
+    auto block = big_block.get_first_block();
+    auto& cfg = block->cfg();
+    auto entry_block = cfg.entry_block();
+    if (block != entry_block && (!min_val || *min_val != 0)) {
+      if (!m_dominators) {
+        m_dominators.reset(
+            new dominators::SimpleFastDominators<cfg::GraphInterface>(cfg));
+      }
+      do {
+        block = m_dominators->get_idom(block);
+        auto val = (*m_max_vals)[block];
+        if (!min_val || (val && *val < *min_val)) {
+          min_val = val;
+          if (min_val && *min_val == 0) {
+            break;
+          }
+        }
+      } while (block != entry_block);
+    }
+    if (!min_val) {
+      return m_sufficiently_hot ? Result::HotNoSourceBlocks
+                                : Result::WarmLoopNoSourceBlocks;
+    }
+    if (*min_val > m_config.block_profiles_hits) {
+      return m_sufficiently_hot ? Result::HotExceedsThresholds
+                                : Result::WarmLoopExceedsThresholds;
+    }
+    return Result::CanOutline;
+  }
+};
+
 static bool can_outline_insn(const RefChecker& ref_checker,
+                             const OptionalReachingInitializedsEnvironments&
+                                 reaching_initialized_init_first_param,
                              IRInstruction* insn) {
   if (!can_outline_opcode(insn->opcode())) {
     return false;
@@ -666,6 +808,12 @@ static bool can_outline_insn(const RefChecker& ref_checker,
     auto rabbit_type =
         DexType::make_type("Lcom/facebook/redex/RabbitRuntimeHelper;");
     if (method->get_class() == rabbit_type) {
+      return false;
+    }
+    if (!PositionPatternSwitchManager::
+            CAN_OUTLINED_METHOD_INVOKE_OUTLINED_METHOD &&
+        insn->opcode() == OPCODE_INVOKE_STATIC && is_outlined_method(method)) {
+      // TODO: Remove this limitation imposed by symbolication infrastructure.
       return false;
     }
   } else if (insn->has_field()) {
@@ -690,6 +838,18 @@ static bool can_outline_insn(const RefChecker& ref_checker,
         return false;
       }
       if (!ref_checker.check_type(insn->get_type())) {
+        return false;
+      }
+    }
+  }
+  if (reaching_initialized_init_first_param) {
+    // In a constructor, we cannot outline instructions that access the first
+    // parameter before the base constructor was called on it.
+    auto& env = reaching_initialized_init_first_param->at(insn);
+    for (size_t i = 0; i < insn->srcs_size(); i++) {
+      auto reg = insn->src(i);
+      const auto& initialized = env.get(reg);
+      if (!initialized.get_constant() || !*initialized.get_constant()) {
         return false;
       }
     }
@@ -778,7 +938,9 @@ using ExploredCallback =
 // particular point in a big block.
 // Result indicates whether the big block was successfully explored to the end.
 static bool explore_candidates_from(
-    LazyReachingInitializedsEnvironments& reaching_initializeds,
+    LazyReachingInitializedsEnvironments& reaching_initialized_new_instances,
+    const OptionalReachingInitializedsEnvironments&
+        reaching_initialized_init_first_param,
     const Config& config,
     const RefChecker& ref_checker,
     const CandidateInstructionCoresSet& recurring_cores,
@@ -797,7 +959,8 @@ static bool explore_candidates_from(
     }
     auto insn = it->insn;
     if (pcn->insns.size() + 1 < MIN_INSNS_SIZE &&
-        !can_outline_insn(ref_checker, insn)) {
+        !can_outline_insn(ref_checker, reaching_initialized_init_first_param,
+                          insn)) {
       return false;
     }
     cores_builder.push_back(insn);
@@ -805,7 +968,8 @@ static bool explore_candidates_from(
         !recurring_cores.count(cores_builder.get_value())) {
       return false;
     }
-    if (!append_to_partial_candidate(reaching_initializeds, insn, pc, pcn)) {
+    if (!append_to_partial_candidate(reaching_initialized_new_instances, insn,
+                                     pc, pcn)) {
       return false;
     }
     if (opcode::is_a_conditional_branch(insn->opcode()) ||
@@ -839,9 +1003,11 @@ static bool explore_candidates_from(
           always_assert(
               is_uniquely_reached_via_pred(succ_big_block->get_first_block()));
           auto succ_ii = big_blocks::InstructionIterable(*succ_big_block);
-          if (!explore_candidates_from(
-                  reaching_initializeds, config, ref_checker, recurring_cores,
-                  pc, succ_pcn.get(), succ_ii.begin(), succ_ii.end())) {
+          if (!explore_candidates_from(reaching_initialized_new_instances,
+                                       reaching_initialized_init_first_param,
+                                       config, ref_checker, recurring_cores, pc,
+                                       succ_pcn.get(), succ_ii.begin(),
+                                       succ_ii.end())) {
             return false;
           }
         }
@@ -882,16 +1048,21 @@ static bool explore_candidates_from(
   return true;
 }
 
-#define STATS                        \
-  FOR_EACH(live_out_to_throw_edge)   \
-  FOR_EACH(live_out_multiple)        \
-  FOR_EACH(live_out_initialized_not) \
-  FOR_EACH(arg_type_not_computed)    \
-  FOR_EACH(arg_type_illegal)         \
-  FOR_EACH(res_type_not_computed)    \
-  FOR_EACH(res_type_illegal)         \
-  FOR_EACH(overlap)                  \
-  FOR_EACH(loop)
+#define STATS                                  \
+  FOR_EACH(live_out_to_throw_edge)             \
+  FOR_EACH(live_out_multiple)                  \
+  FOR_EACH(live_out_initialized_not)           \
+  FOR_EACH(arg_type_not_computed)              \
+  FOR_EACH(arg_type_illegal)                   \
+  FOR_EACH(res_type_not_computed)              \
+  FOR_EACH(res_type_illegal)                   \
+  FOR_EACH(overlap)                            \
+  FOR_EACH(loop)                               \
+  FOR_EACH(block_warm_loop_exceeds_thresholds) \
+  FOR_EACH(block_warm_loop_no_source_blocks)   \
+  FOR_EACH(block_hot)                          \
+  FOR_EACH(block_hot_exceeds_thresholds)       \
+  FOR_EACH(block_hot_no_source_blocks)
 
 struct FindCandidatesStats {
 // NOLINTNEXTLINE(bugprone-macro-parentheses)
@@ -906,7 +1077,7 @@ struct FindCandidatesStats {
 static MethodCandidates find_method_candidates(
     const Config& config,
     const RefChecker& ref_checker,
-    bool skip_loops,
+    const CanOutlineBlockDecider& block_decider,
     DexMethod* method,
     cfg::ControlFlowGraph& cfg,
     const CandidateInstructionCoresSet& recurring_cores,
@@ -940,40 +1111,18 @@ static MethodCandidates find_method_candidates(
         }
         return res;
       });
-  LazyReachingInitializedsEnvironments reaching_initializeds([method, &cfg]() {
-    reaching_initializeds::FixpointIterator fp_iter(cfg,
-                                                    method::is_init(method));
-    fp_iter.run({});
-    ReachingInitializedsEnvironments res;
-    for (auto block : cfg.blocks()) {
-      auto env = fp_iter.get_entry_state_at(block);
-      for (auto& mie : InstructionIterable(block)) {
-        res[mie.insn] = env;
-        fp_iter.analyze_instruction(mie.insn, &env);
-      }
-    }
-    return res;
-  });
-  LazyUnorderedMap<cfg::Block*, bool> is_in_loop([](cfg::Block* block) {
-    std::unordered_set<cfg::Block*> visited;
-    std::queue<cfg::Block*> work_queue;
-    for (auto e : block->succs()) {
-      work_queue.push(e->target());
-    }
-    while (!work_queue.empty()) {
-      auto other_block = work_queue.front();
-      work_queue.pop();
-      if (visited.insert(other_block).second) {
-        if (block == other_block) {
-          return true;
-        }
-        for (auto e : other_block->succs()) {
-          work_queue.push(e->target());
-        }
-      }
-    }
-    return false;
-  });
+  LazyReachingInitializedsEnvironments reaching_initialized_new_instances(
+      [&cfg]() {
+        return reaching_initializeds::get_reaching_initializeds(
+            cfg, reaching_initializeds::Mode::NewInstances);
+      });
+  OptionalReachingInitializedsEnvironments
+      reaching_initialized_init_first_param;
+  if (method::is_init(method)) {
+    reaching_initialized_init_first_param =
+        reaching_initializeds::get_reaching_initializeds(
+            cfg, reaching_initializeds::Mode::FirstLoadParam);
+  }
   OutlinerTypeAnalysis type_analysis(method);
   auto big_blocks = big_blocks::get_big_blocks(cfg);
   // Along big blocks, we are assigning consecutive indices to instructions.
@@ -1095,12 +1244,32 @@ static MethodCandidates find_method_candidates(
             lstats.res_type_illegal++;
             return;
           }
-          if (skip_loops && is_in_loop[first_block]) {
+          auto result = block_decider.can_outline_from_big_block(big_block);
+          if (result != CanOutlineBlockDecider::Result::CanOutline) {
             // We could bail out on this way earlier, but doing it last gives us
             // better statistics on what the damage really is
-            TRACE(ISO, 4, "[invoke sequence outliner] [bail out] Loop");
-            lstats.loop++;
-            return;
+            switch (result) {
+            case CanOutlineBlockDecider::Result::WarmLoop:
+              lstats.loop++;
+              return;
+            case CanOutlineBlockDecider::Result::WarmLoopExceedsThresholds:
+              lstats.block_warm_loop_exceeds_thresholds++;
+              return;
+            case CanOutlineBlockDecider::Result::WarmLoopNoSourceBlocks:
+              lstats.block_warm_loop_no_source_blocks++;
+              return;
+            case CanOutlineBlockDecider::Result::Hot:
+              lstats.block_hot++;
+              return;
+            case CanOutlineBlockDecider::Result::HotExceedsThresholds:
+              lstats.block_hot_exceeds_thresholds++;
+              return;
+            case CanOutlineBlockDecider::Result::HotNoSourceBlocks:
+              lstats.block_hot_no_source_blocks++;
+              return;
+            default:
+              not_reached();
+            }
           }
           auto& cmls = candidates[c];
           std::map<size_t, size_t> ranges;
@@ -1136,9 +1305,10 @@ static MethodCandidates find_method_candidates(
         continue;
       }
       PartialCandidate pc;
-      explore_candidates_from(reaching_initializeds, config, ref_checker,
-                              recurring_cores, &pc, &pc.root, it, end,
-                              &explored_callback);
+      explore_candidates_from(reaching_initialized_new_instances,
+                              reaching_initialized_init_first_param, config,
+                              ref_checker, recurring_cores, &pc, &pc.root, it,
+                              end, &explored_callback);
     }
   }
 
@@ -1153,28 +1323,8 @@ static MethodCandidates find_method_candidates(
 // get_recurring_cores
 ////////////////////////////////////////////////////////////////////////////////
 
-static bool method_has_try_blocks(DexMethod* method) {
-  auto code = method->get_code();
-  if (code->editable_cfg_built()) {
-    auto ii = cfg::InstructionIterable(code->cfg());
-    return std::any_of(ii.begin(), ii.end(),
-                       [](auto& mie) { return mie.type == MFLOW_TRY; });
-  } else {
-    return std::any_of(code->begin(), code->end(),
-                       [](auto& mie) { return mie.type == MFLOW_TRY; });
-  }
-}
-
-static bool can_outline_from_method(
-    DexMethod* method,
-    const std::unordered_set<DexMethod*>& sufficiently_hot_methods) {
+static bool can_outline_from_method(DexMethod* method) {
   if (method->rstate.no_optimizations() || method->rstate.outlined()) {
-    return false;
-  }
-  if (sufficiently_hot_methods.count(method)) {
-    return false;
-  }
-  if (method_has_try_blocks(method)) {
     return false;
   }
 
@@ -1185,28 +1335,47 @@ static bool can_outline_from_method(
 // sequences that are outlinable. Note that all longer recurring outlinable
 // instruction sequences must be comprised of shorter recurring ones.
 static void get_recurring_cores(
+    const Config& config,
     PassManager& mgr,
     const Scope& scope,
+    const std::unordered_set<DexMethod*>& sufficiently_warm_methods,
     const std::unordered_set<DexMethod*>& sufficiently_hot_methods,
     const RefChecker& ref_checker,
-    CandidateInstructionCoresSet* recurring_cores) {
+    CandidateInstructionCoresSet* recurring_cores,
+    ConcurrentMap<DexMethod*, CanOutlineBlockDecider>* block_deciders) {
   ConcurrentMap<CandidateInstructionCores, size_t,
                 CandidateInstructionCoresHasher>
       concurrent_cores;
   walk::parallel::code(
-      scope, [&ref_checker, &sufficiently_hot_methods,
-              &concurrent_cores](DexMethod* method, IRCode& code) {
-        if (!can_outline_from_method(method, sufficiently_hot_methods)) {
+      scope, [&config, &ref_checker, &sufficiently_warm_methods,
+              &sufficiently_hot_methods, &concurrent_cores,
+              block_deciders](DexMethod* method, IRCode& code) {
+        if (!can_outline_from_method(method)) {
           return;
         }
         code.build_cfg(/* editable */ true);
         code.cfg().calculate_exit_block();
+        CanOutlineBlockDecider block_decider(
+            config, sufficiently_warm_methods.count(method),
+            sufficiently_hot_methods.count(method));
         auto& cfg = code.cfg();
+        OptionalReachingInitializedsEnvironments
+            reaching_initialized_init_first_param;
+        if (method::is_init(method)) {
+          reaching_initialized_init_first_param =
+              reaching_initializeds::get_reaching_initializeds(
+                  cfg, reaching_initializeds::Mode::FirstLoadParam);
+        }
         for (auto& big_block : big_blocks::get_big_blocks(cfg)) {
+          if (block_decider.can_outline_from_big_block(big_block) !=
+              CanOutlineBlockDecider::Result::CanOutline) {
+            continue;
+          }
           CandidateInstructionCoresBuilder cores_builder;
           for (auto& mie : big_blocks::InstructionIterable(big_block)) {
             auto insn = mie.insn;
-            if (!can_outline_insn(ref_checker, insn)) {
+            if (!can_outline_insn(
+                    ref_checker, reaching_initialized_init_first_param, insn)) {
               cores_builder.clear();
               continue;
             }
@@ -1219,6 +1388,7 @@ static void get_recurring_cores(
             }
           }
         }
+        block_deciders->emplace(method, std::move(block_decider));
       });
   size_t singleton_cores{0};
   for (auto& p : concurrent_cores) {
@@ -1247,9 +1417,15 @@ struct CandidateInfo {
 };
 
 // We keep track of outlined methods that reside in earlier dexes of the current
-// store
-using ReusableOutlinedMethods =
-    std::unordered_map<Candidate, std::vector<DexMethod*>, CandidateHasher>;
+// store. Order vector is used for keeping the track of the order of each
+// candidate stored.
+struct ReusableOutlinedMethods {
+  std::unordered_map<Candidate,
+                     std::deque<std::pair<DexMethod*, std::set<uint32_t>>>,
+                     CandidateHasher>
+      map;
+  std::vector<Candidate> order;
+};
 
 std::unordered_set<const DexType*> get_declaring_types(
     const CandidateInfo& ci) {
@@ -1358,17 +1534,20 @@ std::unordered_set<const DexType*> get_referenced_types(const Candidate& c) {
 static DexMethod* find_reusable_method(
     const Candidate& c,
     const CandidateInfo& ci,
-    const ReusableOutlinedMethods* reusable_outlined_methods) {
-  if (!reusable_outlined_methods) {
+    const ReusableOutlinedMethods& outlined_methods,
+    bool reuse_outlined_methods_across_dexes) {
+  if (!reuse_outlined_methods_across_dexes) {
+    // reuse_outlined_methods_across_dexes is disabled
     return nullptr;
   }
-  auto it = reusable_outlined_methods->find(c);
-  if (it == reusable_outlined_methods->end()) {
+  auto it = outlined_methods.map.find(c);
+  if (it == outlined_methods.map.end()) {
     return nullptr;
   }
-  auto& methods = it->second;
+  auto& method_pattern_pairs = it->second;
   DexMethod* helper_class_method{nullptr};
-  for (auto method : methods) {
+  for (const auto& vec_entry : method_pattern_pairs) {
+    auto method = vec_entry.first;
     auto cls = type_class(method->get_class());
     if (cls->rstate.outlined()) {
       helper_class_method = method;
@@ -1388,17 +1567,18 @@ static DexMethod* find_reusable_method(
   return helper_class_method;
 }
 
-static size_t get_savings(
-    const Config& config,
-    const Candidate& c,
-    const CandidateInfo& ci,
-    const ReusableOutlinedMethods* reusable_outlined_methods) {
+static size_t get_savings(const Config& config,
+                          const Candidate& c,
+                          const CandidateInfo& ci,
+                          const ReusableOutlinedMethods& outlined_methods) {
   size_t cost = c.size * ci.count;
   size_t outlined_cost =
       COST_METHOD_METADATA +
       (c.res_type ? COST_INVOKE_WITH_RESULT : COST_INVOKE_WITHOUT_RESULT) *
           ci.count;
-  if (find_reusable_method(c, ci, reusable_outlined_methods) == nullptr) {
+  if (find_reusable_method(c, ci, outlined_methods,
+                           config.reuse_outlined_methods_across_dexes) ==
+      nullptr) {
     outlined_cost += COST_METHOD_BODY + c.size;
   }
 
@@ -1432,28 +1612,25 @@ static void get_beneficial_candidates(
     const Config& config,
     PassManager& mgr,
     const Scope& scope,
-    const std::unordered_set<DexMethod*>& sufficiently_warm_methods,
-    const std::unordered_set<DexMethod*>& sufficiently_hot_methods,
     const RefChecker& ref_checker,
     const CandidateInstructionCoresSet& recurring_cores,
-    const ReusableOutlinedMethods* reusable_outlined_methods,
+    const ConcurrentMap<DexMethod*, CanOutlineBlockDecider>& block_deciders,
+    const ReusableOutlinedMethods* outlined_methods,
     std::vector<CandidateWithInfo>* candidates_with_infos,
     std::unordered_map<DexMethod*, std::unordered_set<CandidateId>>*
         candidate_ids_by_methods) {
   ConcurrentMap<Candidate, CandidateInfo, CandidateHasher>
       concurrent_candidates;
   FindCandidatesStats stats;
-  walk::parallel::code(scope, [&config, &sufficiently_warm_methods,
-                               &sufficiently_hot_methods, &ref_checker,
-                               &recurring_cores, &concurrent_candidates,
+  walk::parallel::code(scope, [&config, &ref_checker, &recurring_cores,
+                               &concurrent_candidates, &block_deciders,
                                &stats](DexMethod* method, IRCode& code) {
-    if (!can_outline_from_method(method, sufficiently_hot_methods)) {
+    if (!can_outline_from_method(method)) {
       return;
     }
-    bool skip_loops = !!sufficiently_warm_methods.count(method);
-    for (auto& p :
-         find_method_candidates(config, ref_checker, skip_loops, method,
-                                code.cfg(), recurring_cores, &stats)) {
+    for (auto& p : find_method_candidates(
+             config, ref_checker, block_deciders.at_unsafe(method), method,
+             code.cfg(), recurring_cores, &stats)) {
       std::vector<CandidateMethodLocation>& cmls = p.second;
       concurrent_candidates.update(p.first,
                                    [method, &cmls](const Candidate&,
@@ -1472,7 +1649,7 @@ static void get_beneficial_candidates(
       candidates_by_methods;
   size_t beneficial_count{0}, maleficial_count{0};
   for (auto& p : concurrent_candidates) {
-    if (get_savings(config, p.first, p.second, reusable_outlined_methods) > 0) {
+    if (get_savings(config, p.first, p.second, *outlined_methods) > 0) {
       beneficial_count += p.second.count;
       for (auto& q : p.second.methods) {
         candidates_by_methods[q.first].insert(p.first);
@@ -1587,7 +1764,7 @@ class MethodNameGenerator {
     StableHash stable_hash = stable_hash_value(c);
     auto unique_method_id = m_unique_method_ids[stable_hash]++;
     m_max_unique_method_id = std::max(m_max_unique_method_id, unique_method_id);
-    std::string name("$outlined$");
+    std::string name(OUTLINED_METHOD_NAME_PREFIX);
     name += std::to_string(m_iteration) + "$";
     name += (boost::format("%08x") % stable_hash).str();
     if (unique_method_id > 0) {
@@ -1606,190 +1783,88 @@ class MethodNameGenerator {
   }
 };
 
+// This mimics what generate_debug_instructions(DexClass.cpp) does eventually:
+// ignoring positions that don't have a file.
+static DexPosition* skip_fileless(DexPosition* pos) {
+  for (; pos && !pos->file; pos = pos->parent) {
+  }
+  return pos;
+}
+
+using CallSitePatternIds = std::unordered_map<IRInstruction*, uint32_t>;
+
 class OutlinedMethodCreator {
  private:
+  const Config& m_config;
   PassManager& m_mgr;
   MethodNameGenerator& m_method_name_generator;
   size_t m_outlined_methods{0};
-  size_t m_outlined_method_instructions{0};
-  size_t m_outlined_method_nodes{0};
-  size_t m_outlined_method_positions{0};
+  CallSitePatternIds m_call_site_pattern_ids;
+  std::unordered_map<DexMethod*, std::unique_ptr<DexPosition>>
+      m_unique_entry_positions;
 
-  // The "best" representative set of debug position is that which provides
-  // most detail, i.e. has the highest number of unique debug positions
-  using PositionMap = std::map<const CandidateInstruction*, DexPosition*>;
-  PositionMap get_best_outlined_dbg_positions(const Candidate& c,
-                                              const CandidateInfo& ci) {
-    PositionMap best_positions;
-    size_t best_unique_positions{0};
+  // Gets the set of unique dbg-position patterns.
+  std::set<uint32_t> get_outlined_dbg_positions_patterns(
+      const Candidate& c, const CandidateInfo& ci) {
     std::vector<DexMethod*> ordered_methods;
     for (auto& p : ci.methods) {
       ordered_methods.push_back(p.first);
     }
+    // Sort methods to make sure we get deterministic pattern-ids.
     std::sort(ordered_methods.begin(), ordered_methods.end(),
               compare_dexmethods);
+    std::set<uint32_t> pattern_ids;
+    auto manager = g_redex->get_position_pattern_switch_manager();
     for (auto method : ordered_methods) {
-      auto& cfg = method->get_code()->cfg();
       auto& cmls = ci.methods.at(method);
       for (auto& cml : cmls) {
-        auto root_insn_it = cfg.find_insn(cml.first_insn, cml.hint_block);
-        if (root_insn_it.is_end()) {
-          // Shouldn't happen, but we are not going to fight that here.
-          continue;
+        auto positions = get_outlined_dbg_positions(c, cml, method);
+        auto pattern_id = manager->make_pattern(positions);
+        if (m_config.full_dbg_positions) {
+          m_call_site_pattern_ids.emplace(cml.first_insn, pattern_id);
         }
-        auto dbg_pos = cfg.get_dbg_pos(root_insn_it);
-        if (!dbg_pos) {
-          continue;
-        }
-        PositionMap positions;
-        std::unordered_set<DexPosition*> unique_positions;
-        std::function<void(DexPosition * dbg_pos, const CandidateNode& cn,
-                           big_blocks::Iterator it)>
-            walk;
-        walk = [&positions, &unique_positions, &walk](DexPosition* last_dbg_pos,
-                                                      const CandidateNode& cn,
-                                                      big_blocks::Iterator it) {
-          cfg::Block* last_block{nullptr};
-          for (auto& csi : cn.insns) {
-            auto next_dbg_pos{last_dbg_pos};
-            for (; it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG ||
-                   it->type == MFLOW_SOURCE_BLOCK;
-                 it++) {
-              if (it->type == MFLOW_POSITION) {
-                next_dbg_pos = it->pos.get();
-              }
-            }
-            always_assert(it->type == MFLOW_OPCODE);
-            always_assert(it->insn->opcode() == csi.core.opcode);
-            positions.emplace(&csi, last_dbg_pos);
-            unique_positions.insert(last_dbg_pos);
-            last_dbg_pos = next_dbg_pos;
-            last_block = it.block();
-            it++;
-          }
-          if (!cn.succs.empty()) {
-            always_assert(last_block != nullptr);
-            auto succs = get_ordered_goto_and_branch_succs(last_block);
-            always_assert(succs.size() == cn.succs.size());
-            for (size_t i = 0; i < succs.size(); i++) {
-              always_assert(normalize(succs.at(i)) == cn.succs.at(i).first);
-              auto succ_cn = *cn.succs.at(i).second;
-              auto succ_block = succs.at(i)->target();
-              auto succ_it =
-                  big_blocks::Iterator(succ_block, succ_block->begin());
-              walk(last_dbg_pos, succ_cn, succ_it);
-            }
-          }
-        };
-        walk(dbg_pos, c.root,
-             big_blocks::Iterator(root_insn_it.block(), root_insn_it.unwrap(),
-                                  /* ignore_throws */ true));
-        if (unique_positions.size() > best_unique_positions) {
-          best_positions = positions;
-          best_unique_positions = unique_positions.size();
-          if (best_unique_positions == c.root.insns.size()) {
-            break;
-          }
-        }
+        pattern_ids.insert(pattern_id);
       }
     }
-    return best_positions;
-  }
-
-  // Construct an IRCode datastructure from a candidate.
-  std::unique_ptr<IRCode> get_outlined_code(DexMethod* outlined_method,
-                                            const Candidate& c,
-                                            const PositionMap& dbg_positions) {
-    auto code = std::make_unique<IRCode>(outlined_method, c.temp_regs);
-    std::function<void(const CandidateNode& cn)> walk;
-    walk = [this, &code, &dbg_positions, &walk, &c](const CandidateNode& cn) {
-      m_outlined_method_nodes++;
-      DexPosition* last_dbg_pos{nullptr};
-      for (auto& ci : cn.insns) {
-        auto it = dbg_positions.find(&ci);
-        if (it != dbg_positions.end()) {
-          DexPosition* dbg_pos = it->second;
-          if (dbg_pos != last_dbg_pos &&
-              !opcode::is_a_move_result_pseudo(ci.core.opcode)) {
-            auto cloned_dbg_pos = std::make_unique<DexPosition>(*dbg_pos);
-            cloned_dbg_pos->parent = nullptr;
-            code->push_back(std::move(cloned_dbg_pos));
-            last_dbg_pos = dbg_pos;
-            m_outlined_method_positions++;
-          }
+    always_assert(!pattern_ids.empty());
+    if (!m_config.full_dbg_positions) {
+      // Find the "best" representative set of debug position, that is the one
+      // which provides most detail, i.e. has the highest number of unique debug
+      // positions
+      uint32_t best_pattern_id = *pattern_ids.begin();
+      size_t best_unique_positions{0};
+      const auto& all_managed_patterns = manager->get_patterns();
+      for (auto pattern_id : pattern_ids) {
+        std::unordered_set<DexPosition*> unique_positions;
+        for (auto pos : all_managed_patterns.at(pattern_id)) {
+          unique_positions.insert(pos);
         }
-        auto insn = new IRInstruction(ci.core.opcode);
-        insn->set_srcs_size(ci.srcs.size());
-        for (size_t i = 0; i < ci.srcs.size(); i++) {
-          insn->set_src(i, ci.srcs.at(i));
+        if (unique_positions.size() > best_unique_positions) {
+          best_pattern_id = pattern_id;
+          best_unique_positions = unique_positions.size();
         }
-        if (ci.dest) {
-          insn->set_dest(*ci.dest);
-        }
-        if (insn->has_method()) {
-          insn->set_method(ci.core.method);
-        } else if (insn->has_field()) {
-          insn->set_field(ci.core.field);
-        } else if (insn->has_string()) {
-          insn->set_string(ci.core.string);
-        } else if (insn->has_type()) {
-          insn->set_type(ci.core.type);
-        } else if (insn->has_literal()) {
-          insn->set_literal(ci.core.literal);
-        } else if (insn->has_data()) {
-          insn->set_data(ci.core.data);
-        }
-        code->push_back(insn);
       }
-      m_outlined_method_instructions += cn.insns.size();
-      if (cn.succs.empty()) {
-        if (c.res_type != nullptr) {
-          IROpcode ret_opcode =
-              type::is_object(c.res_type)      ? OPCODE_RETURN_OBJECT
-              : type::is_wide_type(c.res_type) ? OPCODE_RETURN_WIDE
-                                               : OPCODE_RETURN;
-          auto ret_insn = new IRInstruction(ret_opcode);
-          ret_insn->set_src(0, *cn.res_reg);
-          code->push_back(ret_insn);
-        } else {
-          auto ret_insn = new IRInstruction(OPCODE_RETURN_VOID);
-          code->push_back(ret_insn);
-        }
-      } else {
-        auto& last_mie = *code->rbegin();
-        for (auto& p : cn.succs) {
-          auto& e = p.first;
-          if (e.type == cfg::EDGE_GOTO) {
-            always_assert(e == cn.succs.front().first);
-            code->push_back(); // MFLOW_FALLTHROUGH
-          } else {
-            always_assert(e.type == cfg::EDGE_BRANCH);
-            BranchTarget* branch_target =
-                e.case_key ? new BranchTarget(&last_mie, *e.case_key)
-                           : new BranchTarget(&last_mie);
-            code->push_back(branch_target);
-          }
-          walk(*p.second);
-        }
-        return;
-      }
-    };
-    walk(c.root);
-    return code;
+      return {best_pattern_id};
+    }
+    return pattern_ids;
   }
 
  public:
   OutlinedMethodCreator() = delete;
   OutlinedMethodCreator(const OutlinedMethodCreator&) = delete;
   OutlinedMethodCreator& operator=(const OutlinedMethodCreator&) = delete;
-  explicit OutlinedMethodCreator(PassManager& mgr,
+  explicit OutlinedMethodCreator(const Config& config,
+                                 PassManager& mgr,
                                  MethodNameGenerator& method_name_generator)
-      : m_mgr(mgr), m_method_name_generator(method_name_generator) {}
+      : m_config(config),
+        m_mgr(mgr),
+        m_method_name_generator(method_name_generator) {}
 
   // Obtain outlined method for a candidate.
   DexMethod* create_outlined_method(const Candidate& c,
                                     const CandidateInfo& ci,
-                                    const DexType* host_class) {
+                                    const DexType* host_class,
+                                    std::set<uint32_t>* pattern_ids) {
     auto name = m_method_name_generator.get_name(c);
     std::deque<DexType*> arg_types;
     for (auto t : c.arg_types) {
@@ -1801,39 +1876,118 @@ class OutlinedMethodCreator {
     auto outlined_method =
         DexMethod::make_method(const_cast<DexType*>(host_class), name, proto)
             ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
-    auto dbg_positions = get_best_outlined_dbg_positions(c, ci);
-    outlined_method->set_code(
-        get_outlined_code(outlined_method, c, dbg_positions));
+    // get pattern ids
+    *pattern_ids = get_outlined_dbg_positions_patterns(c, ci);
+    always_assert(!(*pattern_ids).empty());
+    // not setting method body here
     outlined_method->set_deobfuscated_name(show(outlined_method));
     outlined_method->rstate.set_dont_inline();
     outlined_method->rstate.set_outlined();
-    change_visibility(outlined_method->get_code(),
-                      const_cast<DexType*>(host_class), outlined_method);
+    // not setting visibility here
     type_class(host_class)->add_method(outlined_method);
-    TRACE(ISO, 5, "[invoke sequence outliner] outlined to %s\n%s",
-          SHOW(outlined_method), SHOW(outlined_method->get_code()));
+    TRACE(ISO, 5, "[invoke sequence outliner] outlined to %s",
+          SHOW(outlined_method));
     m_outlined_methods++;
     return outlined_method;
   }
 
+  CallSitePatternIds* get_call_site_pattern_ids() {
+    if (m_config.full_dbg_positions) {
+      return &m_call_site_pattern_ids;
+    } else {
+      always_assert(m_call_site_pattern_ids.empty());
+      return nullptr;
+    }
+  }
+
+  PositionPattern get_outlined_dbg_positions(const Candidate& c,
+                                             const CandidateMethodLocation& cml,
+                                             DexMethod* method) {
+    auto& cfg = method->get_code()->cfg();
+    auto root_insn_it = cfg.find_insn(cml.first_insn, cml.hint_block);
+    if (root_insn_it.is_end()) {
+      // This should not happen, as for each candidate we never produce
+      // overlapping locations in a method, and overlaps across selected
+      // candidates are prevented by meticulously removing remaining overlapping
+      // occurrences after processing a candidate.
+      not_reached();
+    }
+    PositionPattern positions;
+    auto root_dbg_pos = skip_fileless(cfg.get_dbg_pos(root_insn_it));
+    if (!root_dbg_pos) {
+      if (!m_config.full_dbg_positions) {
+        return positions;
+      }
+      // We'll provide a "synthetic entry position" as the root. Copies of that
+      // position will be made later when it's actually needed. For now, we just
+      // need to obtain a template instance, and we need to store it somewhere
+      // so that we don't leak it.
+      auto it = m_unique_entry_positions.find(method);
+      if (it == m_unique_entry_positions.end()) {
+        it = m_unique_entry_positions
+                 .emplace(method,
+                          DexPosition::make_synthetic_entry_position(method))
+                 .first;
+      }
+      root_dbg_pos = it->second.get();
+      TRACE(ISO, 6,
+            "[instruction sequence outliner] using synthetic position for "
+            "outlined code within %s",
+            SHOW(method));
+    }
+    std::function<void(DexPosition * dbg_pos, const CandidateNode& cn,
+                       big_blocks::Iterator it)>
+        walk;
+    walk = [&positions, &walk](DexPosition* dbg_pos,
+                               const CandidateNode& cn,
+                               big_blocks::Iterator it) {
+      cfg::Block* last_block{nullptr};
+      for (auto& csi : cn.insns) {
+        for (; it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG ||
+               it->type == MFLOW_SOURCE_BLOCK;
+             it++) {
+          if (it->type == MFLOW_POSITION && it->pos->file) {
+            dbg_pos = it->pos.get();
+          }
+        }
+        always_assert(it->type == MFLOW_OPCODE);
+        always_assert(it->insn->opcode() == csi.core.opcode);
+        positions.push_back(dbg_pos);
+        last_block = it.block();
+        it++;
+      }
+      if (!cn.succs.empty()) {
+        always_assert(last_block != nullptr);
+        auto succs = get_ordered_goto_and_branch_succs(last_block);
+        always_assert(succs.size() == cn.succs.size());
+        for (size_t i = 0; i < succs.size(); i++) {
+          always_assert(normalize(succs.at(i)) == cn.succs.at(i).first);
+          auto& succ_cn = *cn.succs.at(i).second;
+          auto succ_block = succs.at(i)->target();
+          auto succ_it = big_blocks::Iterator(succ_block, succ_block->begin());
+          walk(dbg_pos, succ_cn, succ_it);
+        }
+      }
+    };
+    walk(root_dbg_pos, c.root,
+         big_blocks::Iterator(root_insn_it.block(), root_insn_it.unwrap(),
+                              /* ignore_throws */ true));
+    return positions;
+  }
+
   ~OutlinedMethodCreator() {
     m_mgr.incr_metric("num_outlined_methods", m_outlined_methods);
-    m_mgr.incr_metric("num_outlined_method_instructions",
-                      m_outlined_method_instructions);
-    m_mgr.incr_metric("num_outlined_method_nodes", m_outlined_method_nodes);
-    m_mgr.incr_metric("num_outlined_method_positions",
-                      m_outlined_method_positions);
     TRACE(ISO, 2,
-          "[invoke sequence outliner] %zu outlined methods with %zu "
-          "instructions across %zu nodes and %zu positions",
-          m_outlined_methods, m_outlined_method_instructions,
-          m_outlined_method_nodes, m_outlined_method_positions);
+          "[instruction sequence outliner] %zu outlined methods created",
+          m_outlined_methods);
   }
 };
 
 // Rewrite instructions in existing method to invoke an outlined
 // method instead.
 static void rewrite_at_location(DexMethod* outlined_method,
+                                const CallSitePatternIds* call_site_pattern_ids,
+                                DexMethod* method,
                                 cfg::ControlFlowGraph& cfg,
                                 const Candidate& c,
                                 const CandidateMethodLocation& cml) {
@@ -1846,6 +2000,7 @@ static void rewrite_at_location(DexMethod* outlined_method,
     // occurrences after processing a candidate.
     not_reached();
   }
+  auto last_dbg_pos = skip_fileless(cfg.get_dbg_pos(first_insn_it));
   cfg::CFGMutation cfg_mutation(cfg);
   const auto first_arg_reg = c.temp_regs;
   boost::optional<reg_t> last_arg_reg;
@@ -1861,11 +2016,13 @@ static void rewrite_at_location(DexMethod* outlined_method,
       arg_regs.push_back(reg);
     }
   };
-  walk = [&walk, &gather_arg_regs, &cml, &cfg_mutation](
+  walk = [&walk, &last_dbg_pos, &gather_arg_regs, &cml, &cfg, &cfg_mutation](
              const CandidateNode& cn, big_blocks::InstructionIterator it) {
     cfg::Block* last_block{nullptr};
+    boost::optional<cfg::InstructionIterator> last_insn_it;
     for (size_t insn_idx = 0; insn_idx < cn.insns.size();
-         last_block = it.block(), insn_idx++, it++) {
+         last_block = it.block(), last_insn_it = it.unwrap(), insn_idx++,
+                it++) {
       auto& ci = cn.insns.at(insn_idx);
       always_assert(it->insn->opcode() == ci.core.opcode);
       for (size_t i = 0; i < ci.srcs.size(); i++) {
@@ -1875,10 +2032,17 @@ static void rewrite_at_location(DexMethod* outlined_method,
         cfg_mutation.remove(it.unwrap());
       }
     }
-    if (cn.succs.empty() && cn.res_reg) {
-      gather_arg_regs(*cn.res_reg, *cml.out_reg);
-    }
-    if (!cn.succs.empty()) {
+    if (cn.succs.empty()) {
+      if (cn.res_reg) {
+        gather_arg_regs(*cn.res_reg, *cml.out_reg);
+      }
+      if (last_insn_it) {
+        auto dbg_pos = skip_fileless(cfg.get_dbg_pos(*last_insn_it));
+        if (dbg_pos) {
+          last_dbg_pos = dbg_pos;
+        }
+      }
+    } else {
       always_assert(last_block != nullptr);
       auto succs = get_ordered_goto_and_branch_succs(last_block);
       always_assert(succs.size() == cn.succs.size());
@@ -1905,15 +2069,39 @@ static void rewrite_at_location(DexMethod* outlined_method,
     invoke_insn->set_src(i, arg_regs.at(i));
   }
   outlined_method_invocation.push_back(invoke_insn);
+  IRInstruction* move_result_insn = nullptr;
   if (c.res_type) {
-    IRInstruction* move_result_insn =
+    move_result_insn =
         new IRInstruction(opcode::move_result_for_invoke(outlined_method));
     move_result_insn->set_dest(*cml.out_reg);
     outlined_method_invocation.push_back(move_result_insn);
   }
   cfg_mutation.insert_before(first_insn_it, outlined_method_invocation);
+
+  std::unique_ptr<DexPosition> new_dbg_pos;
+  if (call_site_pattern_ids) {
+    auto manager = g_redex->get_position_pattern_switch_manager();
+    auto pattern_id = call_site_pattern_ids->at(cml.first_insn);
+    new_dbg_pos = manager->make_pattern_position(pattern_id);
+  } else {
+    new_dbg_pos = std::make_unique<DexPosition>(0);
+    new_dbg_pos->bind(DexString::make_string(show(outlined_method)),
+                      DexString::make_string("RedexGenerated"));
+  }
+
+  cfg_mutation.insert_before(first_insn_it, std::move(new_dbg_pos));
+  if (last_dbg_pos) {
+    new_dbg_pos = std::make_unique<DexPosition>(*last_dbg_pos);
+  } else {
+    new_dbg_pos = DexPosition::make_synthetic_entry_position(method);
+    TRACE(
+        ISO, 6,
+        "[instruction sequence outliner] reverting to synthetic position in %s",
+        SHOW(method));
+  }
+  cfg_mutation.insert_after(first_insn_it, std::move(new_dbg_pos));
   cfg_mutation.flush();
-};
+}
 
 // Manages references and assigns numeric ids to classes
 // We don't want to use more methods or types than are available, so we gather
@@ -1938,15 +2126,12 @@ class DexState {
            size_t reserved_trefs,
            size_t reserved_mrefs)
       : m_mgr(mgr), m_dex(dex), m_dex_id(dex_id) {
-    std::vector<DexMethodRef*> method_refs;
-    std::vector<DexType*> type_refs;
+    std::unordered_set<DexMethodRef*> method_refs;
     for (auto cls : dex) {
       cls->gather_methods(method_refs);
-      cls->gather_types(type_refs);
+      cls->gather_types(m_type_refs);
     }
-    sort_unique(method_refs);
     m_method_refs_count = method_refs.size() + reserved_mrefs;
-    m_type_refs.insert(type_refs.begin(), type_refs.end());
 
     walk::classes(dex, [&class_ids = m_class_ids](DexClass* cls) {
       class_ids.emplace(cls->get_type(), class_ids.size());
@@ -2176,8 +2361,8 @@ class HostClassSelector {
     }
 
     // If an outlined code snippet occurs in many unrelated classes, but always
-    // references some types that share a common base type, then that
-    // common base type is a reasonable place where to put the outlined code.
+    // references some types that share a common base type, then that common
+    // base type is a reasonable place where to put the outlined code.
     auto referenced_types = get_referenced_types(c);
     host_class = get_direct_or_base_class(
         referenced_types, get_super_classes,
@@ -2210,13 +2395,14 @@ using NewlyOutlinedMethods =
 bool outline_candidate(
     const Candidate& c,
     const CandidateInfo& ci,
-    ReusableOutlinedMethods* reusable_outlined_methods,
+    ReusableOutlinedMethods* outlined_methods,
     NewlyOutlinedMethods* newly_outlined_methods,
     DexState* dex_state,
     HostClassSelector* host_class_selector,
     OutlinedMethodCreator* outlined_method_creator,
-    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
-        experiments_contexts) {
+    std::unique_ptr<ab_test::ABExperimentContext>& ab_experiment_context,
+    size_t* num_reused_methods,
+    bool reuse_outlined_methods_across_dexes) {
   // Before attempting to create or reuse an outlined method that hasn't been
   // referenced in this dex before, we'll make sure that all the involved
   // type refs can be added to the dex. We collect those type refs.
@@ -2226,14 +2412,41 @@ bool outline_candidate(
   }
   auto rtype = c.res_type ? c.res_type : type::_void();
   type_refs_to_insert.insert(const_cast<DexType*>(rtype));
+  auto call_site_pattern_ids =
+      outlined_method_creator->get_call_site_pattern_ids();
+  auto manager = g_redex->get_position_pattern_switch_manager();
 
-  DexMethod* outlined_method{
-      find_reusable_method(c, ci, reusable_outlined_methods)};
+  DexMethod* outlined_method{find_reusable_method(
+      c, ci, *outlined_methods, reuse_outlined_methods_across_dexes)};
   if (outlined_method) {
     type_refs_to_insert.insert(outlined_method->get_class());
     if (!dex_state->can_insert_type_refs(type_refs_to_insert)) {
       return false;
     }
+
+    auto& pairs = outlined_methods->map.at(c);
+    auto it = std::find_if(
+        pairs.begin(), pairs.end(),
+        [&outlined_method](
+            const std::pair<DexMethod*, std::set<uint32_t>>& pair) {
+          return pair.first == outlined_method;
+        });
+    auto& pattern_ids = it->second;
+
+    (*num_reused_methods)++;
+    for (auto& p : ci.methods) {
+      auto method = p.first;
+      for (auto& cml : p.second) {
+        // if the current method is reused then the call site
+        // didn't have the pattern id. Need to create and add pattern_id
+        auto positions =
+            outlined_method_creator->get_outlined_dbg_positions(c, cml, method);
+        auto pattern_id = manager->make_pattern(positions);
+        call_site_pattern_ids->emplace(cml.first_insn, pattern_id);
+        pattern_ids.insert(pattern_id);
+      }
+    }
+
     TRACE(ISO, 5, "[invoke sequence outliner] reused %s",
           SHOW(outlined_method));
   } else {
@@ -2258,12 +2471,11 @@ bool outline_candidate(
     if (must_create_next_outlined_class) {
       host_class_selector->create_next_outlined_class();
     }
-    outlined_method =
-        outlined_method_creator->create_outlined_method(c, ci, host_class);
-    if (reusable_outlined_methods) {
-      (*reusable_outlined_methods)[c].push_back(outlined_method);
-    }
-
+    std::set<uint32_t> position_pattern_ids;
+    outlined_method = outlined_method_creator->create_outlined_method(
+        c, ci, host_class, &position_pattern_ids);
+    outlined_methods->order.push_back(c);
+    outlined_methods->map[c].push_back({outlined_method, position_pattern_ids});
     auto& methods = (*newly_outlined_methods)[outlined_method];
     for (auto& p : ci.methods) {
       methods.push_back(p.first);
@@ -2273,15 +2485,14 @@ bool outline_candidate(
   for (auto& p : ci.methods) {
     auto method = p.first;
     auto& cfg = method->get_code()->cfg();
-    if (experiments_contexts->count(method) == 0) {
-      auto exp =
-          ab_test::ABExperimentContext::create(&cfg, method, "outliner_v1");
-      experiments_contexts->insert({method, std::move(exp)});
-    }
+
+    ab_experiment_context->try_register_method(method);
+
     TRACE(ISO, 7, "[invoke sequence outliner] before outlined %s from %s\n%s",
           SHOW(outlined_method), SHOW(method), SHOW(cfg));
     for (auto& cml : p.second) {
-      rewrite_at_location(outlined_method, cfg, c, cml);
+      rewrite_at_location(outlined_method, call_site_pattern_ids, method, cfg,
+                          c, cml);
     }
     TRACE(ISO, 6, "[invoke sequence outliner] after outlined %s from %s\n%s",
           SHOW(outlined_method), SHOW(method), SHOW(cfg));
@@ -2299,12 +2510,13 @@ static NewlyOutlinedMethods outline(
     std::vector<CandidateWithInfo>* candidates_with_infos,
     std::unordered_map<DexMethod*, std::unordered_set<CandidateId>>*
         candidate_ids_by_methods,
-    ReusableOutlinedMethods* reusable_outlined_methods,
+    ReusableOutlinedMethods* outlined_methods,
     size_t iteration,
-    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
-        experiments_contexts) {
+    std::unique_ptr<ab_test::ABExperimentContext>& ab_experiment_context,
+    size_t* num_reused_methods) {
   MethodNameGenerator method_name_generator(mgr, iteration);
-  OutlinedMethodCreator outlined_method_creator(mgr, method_name_generator);
+  OutlinedMethodCreator outlined_method_creator(config, mgr,
+                                                method_name_generator);
   HostClassSelector host_class_selector(config, mgr, dex_state, min_sdk,
                                         iteration);
   // While we have a set of beneficial candidates, many are overlapping each
@@ -2315,11 +2527,11 @@ static NewlyOutlinedMethods outline(
   using Priority = uint64_t;
   MutablePriorityQueue<CandidateId, Priority> pq;
   auto get_priority = [&config, &candidates_with_infos,
-                       reusable_outlined_methods](CandidateId id) {
+                       outlined_methods](CandidateId id) {
     auto& cwi = candidates_with_infos->at(id);
-    Priority primary_priority = get_savings(config, cwi.candidate, cwi.info,
-                                            reusable_outlined_methods) *
-                                cwi.candidate.size;
+    Priority primary_priority =
+        get_savings(config, cwi.candidate, cwi.info, *outlined_methods) *
+        cwi.candidate.size;
     // clip primary_priority to 32-bit
     if (primary_priority >= (1UL << 32)) {
       primary_priority = (1UL << 32) - 1;
@@ -2353,20 +2565,21 @@ static NewlyOutlinedMethods outline(
     auto id = pq.front();
     auto& cwi = candidates_with_infos->at(id);
     auto savings =
-        get_savings(config, cwi.candidate, cwi.info, reusable_outlined_methods);
+        get_savings(config, cwi.candidate, cwi.info, *outlined_methods);
     always_assert(savings > 0);
     total_savings += savings;
     outlined_count += cwi.info.count;
     outlined_sequences_count++;
 
     TRACE(ISO, 3,
-          "[invoke sequence outliner] %4ux(%3u) [%zu]: %zu byte savings",
+          "[invoke sequence outliner] %4zx(%3zu) [%zu]: %zu byte savings",
           cwi.info.count, cwi.info.methods.size(), cwi.candidate.size,
           2 * savings);
-    if (outline_candidate(cwi.candidate, cwi.info, reusable_outlined_methods,
+    if (outline_candidate(cwi.candidate, cwi.info, outlined_methods,
                           &newly_outlined_methods, &dex_state,
                           &host_class_selector, &outlined_method_creator,
-                          experiments_contexts)) {
+                          ab_experiment_context, num_reused_methods,
+                          config.reuse_outlined_methods_across_dexes)) {
       dex_state.insert_method_ref();
     } else {
       TRACE(ISO, 3, "[invoke sequence outliner] could not ouline");
@@ -2402,9 +2615,8 @@ static NewlyOutlinedMethods outline(
     // Update priorities of affected candidates
     for (auto other_id : other_candidate_ids_with_changes) {
       auto& other_cwi = candidates_with_infos->at(other_id);
-      auto other_savings =
-          get_savings(config, other_cwi.candidate, other_cwi.info,
-                      reusable_outlined_methods);
+      auto other_savings = get_savings(config, other_cwi.candidate,
+                                       other_cwi.info, *outlined_methods);
       if (other_savings == 0) {
         erase(other_id, other_cwi);
       } else {
@@ -2603,31 +2815,18 @@ void reorder_with_method_profiles(
 // clear_cfgs
 ////////////////////////////////////////////////////////////////////////////////
 
-static size_t clear_cfgs(
-    const Scope& scope,
-    const std::unordered_set<DexMethod*>& sufficiently_hot_methods,
-    ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>*
-        experiments_contexts) {
+static size_t clear_cfgs(const Scope& scope) {
   std::atomic<size_t> methods{0};
-  walk::parallel::code(
-      scope, [&sufficiently_hot_methods, &methods,
-              experiments_contexts](DexMethod* method, IRCode& code) {
-        if (!can_outline_from_method(method, sufficiently_hot_methods)) {
-          return;
-        }
+  walk::parallel::code(scope, [&methods](DexMethod* method, IRCode& code) {
+    if (!can_outline_from_method(method)) {
+      return;
+    }
 
-        auto exp = experiments_contexts->get(method, nullptr);
-        if (exp) {
-          exp->flush();
-          experiments_contexts->erase(method);
-        } else {
-          code.clear_cfg();
-        }
+    code.clear_cfg();
 
-        methods++;
-      });
+    methods++;
+  });
 
-  always_assert(experiments_contexts->size() == 0);
   return (size_t)methods;
 }
 
@@ -2738,10 +2937,228 @@ PerfSensitivity parse_perf_sensitivity(const std::string& str) {
   always_assert_log(false, "Unknown perf sensitivity: %s", str.c_str());
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// reorder_all_methods
+////////////////////////////////////////////////////////////////////////////////
+
+// helper function to reorder all the outlined methods
+// after all the dex files are processed.
+void reorder_all_methods(
+    const Config& config,
+    PassManager& mgr,
+    const std::unordered_map<const DexMethodRef*, double>& methods_global_order,
+    const std::vector<std::pair<const Scope*, const NewlyOutlinedMethods>>&
+        outlined_methods_to_reorder) {
+  for (auto& dex_methods_pair : outlined_methods_to_reorder) {
+    auto& dex = dex_methods_pair.first;
+    auto& outlined_methods = dex_methods_pair.second;
+    reorder_with_method_profiles(config, mgr, *dex, methods_global_order,
+                                 outlined_methods);
+  }
+}
+
+class OutlinedMethodBodySetter {
+ private:
+  const Config& m_config;
+  PassManager& m_mgr;
+  size_t m_outlined_method_body_set{0};
+  size_t m_outlined_method_nodes{0};
+  size_t m_outlined_method_positions{0};
+  size_t m_outlined_method_instructions{0};
+
+ public:
+  OutlinedMethodBodySetter() = delete;
+  OutlinedMethodBodySetter(const OutlinedMethodBodySetter&) = delete;
+  OutlinedMethodBodySetter& operator=(const OutlinedMethodBodySetter&) = delete;
+  explicit OutlinedMethodBodySetter(const Config& config, PassManager& mgr)
+      : m_config(config), m_mgr(mgr) {}
+
+  ~OutlinedMethodBodySetter() {
+    m_mgr.incr_metric("num_outlined_method_body_set",
+                      m_outlined_method_body_set);
+    m_mgr.incr_metric("num_outlined_method_instructions",
+                      m_outlined_method_instructions);
+    m_mgr.incr_metric("num_outlined_method_nodes", m_outlined_method_nodes);
+    m_mgr.incr_metric("num_outlined_method_positions",
+                      m_outlined_method_positions);
+    TRACE(ISO, 2,
+          "[invoke sequence outliner] set body for %zu outlined methods with "
+          "%zu "
+          "instructions across %zu nodes and %zu positions",
+          m_outlined_method_body_set, m_outlined_method_instructions,
+          m_outlined_method_nodes, m_outlined_method_positions);
+  }
+
+  // Construct an IRCode datastructure from a candidate.
+  std::unique_ptr<IRCode> get_outlined_code(
+      DexMethod* outlined_method,
+      const Candidate& c,
+      const std::set<uint32_t>& current_pattern_ids) {
+    auto manager = g_redex->get_position_pattern_switch_manager();
+    std::map<uint32_t, const PositionPattern*> current_patterns;
+    bool any_positions = false;
+    const auto& all_managed_patterns = manager->get_patterns();
+    for (auto pattern_id : current_pattern_ids) {
+      auto pattern = &all_managed_patterns.at(pattern_id);
+      current_patterns.emplace(pattern_id, pattern);
+      if (!pattern->empty()) {
+        any_positions = true;
+      }
+    }
+    auto code = std::make_unique<IRCode>(outlined_method, c.temp_regs);
+    if (any_positions) {
+      code->set_debug_item(std::make_unique<DexDebugItem>());
+    }
+    std::function<void(const CandidateNode& cn)> walk;
+    std::unordered_map<DexPosition*, DexPosition*> cloned_dbg_positions;
+    std::function<DexPosition*(DexPosition*)> get_or_add_cloned_dbg_position;
+    get_or_add_cloned_dbg_position =
+        [this, &code, &get_or_add_cloned_dbg_position,
+         &cloned_dbg_positions](DexPosition* dbg_pos) -> DexPosition* {
+      always_assert(dbg_pos);
+      auto it = cloned_dbg_positions.find(dbg_pos);
+      if (it != cloned_dbg_positions.end()) {
+        return it->second;
+      }
+      auto cloned_dbg_pos = std::make_unique<DexPosition>(*dbg_pos);
+      if (dbg_pos->parent) {
+        cloned_dbg_pos->parent =
+            get_or_add_cloned_dbg_position(dbg_pos->parent);
+      }
+      auto cloned_dbg_pos_ptr = cloned_dbg_pos.get();
+      code->push_back(std::move(cloned_dbg_pos));
+      m_outlined_method_positions++;
+      cloned_dbg_positions.emplace(dbg_pos, cloned_dbg_pos_ptr);
+      return cloned_dbg_pos_ptr;
+    };
+    size_t dbg_positions_idx = 0;
+    walk = [this, manager, &code, &current_patterns, any_positions, &walk, &c,
+            &get_or_add_cloned_dbg_position,
+            &dbg_positions_idx](const CandidateNode& cn) {
+      m_outlined_method_nodes++;
+      std::unordered_map<uint32_t, DexPosition*> last_dbg_poses;
+      for (auto& p : current_patterns) {
+        last_dbg_poses.emplace(p.first, nullptr);
+      }
+      for (auto& ci : cn.insns) {
+        if (!opcode::is_a_move_result_pseudo(ci.core.opcode) && any_positions) {
+          PositionSwitch position_switch;
+          bool any_changed = false;
+          for (auto& p : current_patterns) {
+            auto pattern_id = p.first;
+            auto& pattern = p.second;
+            DexPosition* dbg_pos =
+                pattern->empty() ? nullptr : pattern->at(dbg_positions_idx);
+            position_switch.push_back({pattern_id, dbg_pos});
+            auto& last_dbg_pos = last_dbg_poses.at(pattern_id);
+            if (dbg_pos != last_dbg_pos) {
+              always_assert(dbg_pos);
+              any_changed = true;
+              last_dbg_pos = dbg_pos;
+            }
+          }
+          if (any_changed) {
+            if (current_patterns.size() == 1) {
+              get_or_add_cloned_dbg_position(position_switch.front().position);
+            } else {
+              always_assert(position_switch.size() >= 2);
+              auto switch_id = manager->make_switch(position_switch);
+              code->push_back(manager->make_switch_position(switch_id));
+            }
+          }
+        }
+        dbg_positions_idx++;
+        if (m_config.debug_make_crashing &&
+            opcode::is_an_iget(ci.core.opcode)) {
+          auto const_insn = new IRInstruction(OPCODE_CONST);
+          const_insn->set_literal(0);
+          const_insn->set_dest(ci.srcs.at(0));
+          code->push_back(const_insn);
+        }
+        auto insn = new IRInstruction(ci.core.opcode);
+        insn->set_srcs_size(ci.srcs.size());
+        for (size_t i = 0; i < ci.srcs.size(); i++) {
+          insn->set_src(i, ci.srcs.at(i));
+        }
+        if (ci.dest) {
+          insn->set_dest(*ci.dest);
+        }
+        if (insn->has_method()) {
+          insn->set_method(ci.core.method);
+        } else if (insn->has_field()) {
+          insn->set_field(ci.core.field);
+        } else if (insn->has_string()) {
+          insn->set_string(ci.core.string);
+        } else if (insn->has_type()) {
+          insn->set_type(ci.core.type);
+        } else if (insn->has_literal()) {
+          insn->set_literal(ci.core.literal);
+        } else if (insn->has_data()) {
+          insn->set_data(ci.core.data);
+        }
+        code->push_back(insn);
+      }
+      m_outlined_method_instructions += cn.insns.size();
+      if (cn.succs.empty()) {
+        if (c.res_type != nullptr) {
+          IROpcode ret_opcode =
+              type::is_object(c.res_type)      ? OPCODE_RETURN_OBJECT
+              : type::is_wide_type(c.res_type) ? OPCODE_RETURN_WIDE
+                                               : OPCODE_RETURN;
+          auto ret_insn = new IRInstruction(ret_opcode);
+          ret_insn->set_src(0, *cn.res_reg);
+          code->push_back(ret_insn);
+        } else {
+          auto ret_insn = new IRInstruction(OPCODE_RETURN_VOID);
+          code->push_back(ret_insn);
+        }
+      } else {
+        auto& last_mie = *code->rbegin();
+        for (auto& p : cn.succs) {
+          auto& e = p.first;
+          if (e.type == cfg::EDGE_GOTO) {
+            always_assert(e == cn.succs.front().first);
+            code->push_back(); // MFLOW_FALLTHROUGH
+          } else {
+            always_assert(e.type == cfg::EDGE_BRANCH);
+            BranchTarget* branch_target =
+                e.case_key ? new BranchTarget(&last_mie, *e.case_key)
+                           : new BranchTarget(&last_mie);
+            code->push_back(branch_target);
+          }
+          walk(*p.second);
+        }
+      }
+    };
+    walk(c.root);
+    return code;
+  }
+
+  // set body for each method stored in ReusableOutlinedMethod
+  void set_method_body(ReusableOutlinedMethods& outlined_methods) {
+
+    for (auto& c : outlined_methods.order) {
+      auto& method_pattern_pairs = outlined_methods.map[c];
+      auto& outlined_method = method_pattern_pairs.front().first;
+      auto& position_pattern_ids = method_pattern_pairs.front().second;
+      always_assert(!position_pattern_ids.empty());
+      outlined_method->set_code(
+          get_outlined_code(outlined_method, c, position_pattern_ids));
+      change_visibility(outlined_method->get_code(),
+                        outlined_method->get_class(), outlined_method);
+      TRACE(ISO, 5, "[invoke sequence outliner] set the body of %s as \n%s",
+            SHOW(outlined_method), SHOW(outlined_method->get_code()));
+      m_outlined_method_body_set++;
+      // pop up the front pair to avoid duplicate
+      method_pattern_pairs.pop_front();
+    }
+  }
+};
+
 } // namespace
 
 void InstructionSequenceOutliner::bind_config() {
-  bind("max_insns_size", m_config.min_insns_size, m_config.min_insns_size,
+  bind("min_insns_size", m_config.min_insns_size, m_config.min_insns_size,
        "Minimum number of instructions to be outlined in a sequence");
   bind("max_insns_size", m_config.max_insns_size, m_config.max_insns_size,
        "Maximum number of instructions to be outlined in a sequence");
@@ -2763,6 +3180,10 @@ void InstructionSequenceOutliner::bind_config() {
        "Loops are not outlined from warm methods");
   std::string perf_sensitivity_str;
   bind("perf_sensitivity", "always-hot", perf_sensitivity_str);
+  bind("block_profiles_hits",
+       m_config.block_profiles_hits,
+       m_config.block_profiles_hits,
+       "No code is outlined out of hot blocks in hot methods");
   bind("reuse_outlined_methods_across_dexes",
        m_config.reuse_outlined_methods_across_dexes,
        m_config.reuse_outlined_methods_across_dexes,
@@ -2780,6 +3201,13 @@ void InstructionSequenceOutliner::bind_config() {
   bind("outline_from_primary_dex", m_config.outline_from_primary_dex,
        m_config.outline_from_primary_dex,
        "Whether to outline from primary dex");
+  bind("full_dbg_positions", m_config.full_dbg_positions,
+       m_config.full_dbg_positions,
+       "Whether to encode all possible outlined positions");
+  bind("debug_make_crashing", m_config.debug_make_crashing,
+       m_config.debug_make_crashing,
+       "Make outlined code crash, to harvest crashing stack traces involving "
+       "outlined code.");
   after_configuration([=]() {
     always_assert(m_config.min_insns_size >= MIN_INSNS_SIZE);
     always_assert(m_config.max_insns_size >= m_config.min_insns_size);
@@ -2792,6 +3220,12 @@ void InstructionSequenceOutliner::bind_config() {
 void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
                                            ConfigFiles& config,
                                            PassManager& mgr) {
+  auto ab_experiment_context =
+      ab_test::ABExperimentContext::create("outliner_v1");
+  if (ab_experiment_context->use_control()) {
+    return;
+  }
+
   int32_t min_sdk = mgr.get_redex_options().min_sdk;
   mgr.incr_metric("min_sdk", min_sdk);
   TRACE(ISO, 2, "[invoke sequence outliner] min_sdk: %d", min_sdk);
@@ -2829,10 +3263,12 @@ void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
       ISO, 2,
       "[invoke sequence outliner] found %zu reserved trefs, %zu reserved mrefs",
       reserved_trefs, reserved_mrefs);
-  std::unique_ptr<ReusableOutlinedMethods> reusable_outlined_methods;
-  if (m_config.reuse_outlined_methods_across_dexes) {
-    reusable_outlined_methods = std::make_unique<ReusableOutlinedMethods>();
-  }
+  ReusableOutlinedMethods outlined_methods;
+  OutlinedMethodBodySetter outlined_method_body_setter(m_config, mgr);
+  // keep track of the outlined methods and scope for reordering later
+  std::vector<std::pair<const Scope*, const NewlyOutlinedMethods>>
+      outlined_methods_to_reorder;
+  size_t num_reused_methods{0};
   boost::optional<size_t> last_store_idx;
   auto iteration = m_iteration++;
   bool is_primary_dex{true};
@@ -2854,45 +3290,42 @@ void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
                                    return xstores.get_store_idx(
                                               cls->get_type()) != store_idx;
                                  }) == dex.end());
-      if (reusable_outlined_methods && last_store_idx &&
+      if (last_store_idx &&
           xstores.illegal_ref_between_stores(store_idx, *last_store_idx)) {
         // TODO: Keep around all store dependencies and reuse when possible
+        // set method body before the storage is cleared.
+        outlined_method_body_setter.set_method_body(outlined_methods);
         TRACE(ISO, 3,
               "Clearing reusable outlined methods when transitioning from "
               "store %zu to %zu",
               *last_store_idx, store_idx);
-        reusable_outlined_methods->clear();
+        outlined_methods.map.clear();
+        outlined_methods.order.clear();
       }
       last_store_idx = store_idx;
       RefChecker ref_checker{&xstores, store_idx, min_sdk_api};
       CandidateInstructionCoresSet recurring_cores;
-      get_recurring_cores(mgr, dex, sufficiently_hot_methods, ref_checker,
-                          &recurring_cores);
+      ConcurrentMap<DexMethod*, CanOutlineBlockDecider> block_deciders;
+      get_recurring_cores(m_config, mgr, dex, sufficiently_warm_methods,
+                          sufficiently_hot_methods, ref_checker,
+                          &recurring_cores, &block_deciders);
       std::vector<CandidateWithInfo> candidates_with_infos;
       std::unordered_map<DexMethod*, std::unordered_set<CandidateId>>
           candidate_ids_by_methods;
       get_beneficial_candidates(
-          m_config, mgr, dex, sufficiently_warm_methods,
-          sufficiently_hot_methods, ref_checker, recurring_cores,
-          reusable_outlined_methods.get(), &candidates_with_infos,
-          &candidate_ids_by_methods);
+          m_config, mgr, dex, ref_checker, recurring_cores, block_deciders,
+          &outlined_methods, &candidates_with_infos, &candidate_ids_by_methods);
 
       // TODO: Merge candidates that are equivalent except that one returns
       // something and the other doesn't. Affects around 1.5% of candidates.
       DexState dex_state(mgr, dex, dex_id++, reserved_trefs, reserved_mrefs);
-      ConcurrentMap<DexMethod*, std::shared_ptr<ab_test::ABExperimentContext>>
-          experiments_contexts;
       auto newly_outlined_methods =
           outline(m_config, mgr, dex_state, min_sdk, &candidates_with_infos,
-                  &candidate_ids_by_methods, reusable_outlined_methods.get(),
-                  iteration, &experiments_contexts);
-
-      reorder_with_method_profiles(m_config, mgr, dex, methods_global_order,
-                                   newly_outlined_methods);
+                  &candidate_ids_by_methods, &outlined_methods, iteration,
+                  ab_experiment_context, &num_reused_methods);
+      outlined_methods_to_reorder.push_back({&dex, newly_outlined_methods});
       auto affected_methods = count_affected_methods(newly_outlined_methods);
-
-      auto total_methods =
-          clear_cfgs(dex, sufficiently_hot_methods, &experiments_contexts);
+      auto total_methods = clear_cfgs(dex);
       if (total_methods > 0) {
         mgr.incr_metric(std::string("percent_methods_affected_in_Dex") +
                             std::to_string(dex_id),
@@ -2900,6 +3333,15 @@ void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
       }
     }
   }
+
+  // set body of the methods after all
+  // patterns are discovered then reorder
+  outlined_method_body_setter.set_method_body(outlined_methods);
+  reorder_all_methods(m_config, mgr, methods_global_order,
+                      outlined_methods_to_reorder);
+
+  ab_experiment_context->flush();
+  mgr.incr_metric("num_reused_methods", num_reused_methods);
 }
 
 static InstructionSequenceOutliner s_pass;

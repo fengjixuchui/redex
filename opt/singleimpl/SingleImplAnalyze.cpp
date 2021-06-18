@@ -85,7 +85,7 @@ DexType* AnalysisImpl::get_and_check_single_impl(DexType* type) {
 void AnalysisImpl::create_single_impl(const TypeMap& single_impl,
                                       const TypeSet& intfs,
                                       const SingleImplConfig& config) {
-  for (const auto intf_it : single_impl) {
+  for (auto const& intf_it : single_impl) {
     auto intf = intf_it.first;
     auto intf_cls = type_class(intf);
     always_assert(intf_cls && !intf_cls->is_external());
@@ -294,7 +294,14 @@ void AnalysisImpl::escape_cross_stores() {
     if (cls != nullptr) {
       if (xstores.illegal_ref_load_types(intf_it.first, cls)) {
         escape_interface(intf_it.first, CROSS_STORES);
-        TRACE(INTF, 0,
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          TRACE(INTF, 0,
+                "Found transitive cross store violation! For details, run with "
+                "TRACE=INTF:1.");
+        }
+        TRACE(INTF, 1,
               "Warning: found %s which is by itself not a cross-store "
               "violation for %s but depends on other types that are!",
               SHOW(cls), SHOW(intf_it.first));
@@ -365,8 +372,10 @@ void AnalysisImpl::analyze_opcodes() {
                        IRInstruction* insn) {
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].referencing_methods[referrer][insn] = insn_it;
-      single_impls[intf].methodrefs[meth].insert(insn);
+      auto& si = single_impls.at(intf);
+      std::lock_guard<std::mutex> lock(si.mutex);
+      si.referencing_methods[referrer][insn] = insn_it;
+      si.methodrefs[meth].insert(insn);
     }
   };
 
@@ -395,12 +404,14 @@ void AnalysisImpl::analyze_opcodes() {
     const auto type = field->get_type();
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].referencing_methods[referrer][insn] = insn_it;
-      single_impls[intf].fieldrefs[field].push_back(insn);
+      auto& si = single_impls.at(intf);
+      std::lock_guard<std::mutex> lock(si.mutex);
+      si.referencing_methods[referrer][insn] = insn_it;
+      si.fieldrefs[field].push_back(insn);
     }
   };
 
-  walk::code(scope, [&](DexMethod* method, IRCode& code) {
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     redex_assert(!code.editable_cfg_built()); // Need *one* way to
     auto ii = ir_list::InstructionIterable(code);
     const auto& end = ii.end();
@@ -417,8 +428,10 @@ void AnalysisImpl::analyze_opcodes() {
       case OPCODE_FILLED_NEW_ARRAY: {
         auto intf = get_and_check_single_impl(insn->get_type());
         if (intf) {
-          single_impls[intf].referencing_methods[method][insn] = it.unwrap();
-          single_impls[intf].typerefs.push_back(insn);
+          auto& si = single_impls.at(intf);
+          std::lock_guard<std::mutex> lock(si.mutex);
+          si.referencing_methods[method][insn] = it.unwrap();
+          si.typerefs.push_back(insn);
         }
         break;
       }
@@ -464,8 +477,10 @@ void AnalysisImpl::analyze_opcodes() {
           if (std::find(meths.begin(), meths.end(), meth) == meths.end()) {
             escape_interface(intf, UNKNOWN_MREF);
           } else {
-            single_impls[intf].referencing_methods[method][insn] = it.unwrap();
-            single_impls[intf].intf_methodrefs[meth].insert(insn);
+            auto& si = single_impls.at(intf);
+            std::lock_guard<std::mutex> lock(si.mutex);
+            si.referencing_methods[method][insn] = it.unwrap();
+            si.intf_methodrefs[meth].insert(insn);
           }
         }
         check_sig(method, it.unwrap(), meth, insn);
@@ -511,6 +526,8 @@ std::unique_ptr<SingleImplAnalysis> SingleImplAnalysis::analyze(
 void SingleImplAnalysis::escape_interface(DexType* intf, EscapeReason reason) {
   auto sit = single_impls.find(intf);
   if (sit == single_impls.end()) return;
+  if (sit->second.escape & reason) return;
+  std::lock_guard<std::mutex> lock(sit->second.mutex);
   sit->second.escape |= reason;
   TRACE(INTF, 5, "(ESC) Escape %s => 0x%X", SHOW(intf), reason);
   const auto intf_cls = type_class(intf);

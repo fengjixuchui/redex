@@ -192,6 +192,27 @@ std::vector<Entry*> get_id_order(UnorderedMap& umap) {
   return order;
 }
 
+// Will the split block have a position before the first
+// instruction, or do we need to insert one?
+bool needs_pos(const IRList::iterator& begin, const IRList::iterator& end) {
+  for (auto it = begin; it != end; it++) {
+    switch (it->type) {
+    case MFLOW_OPCODE: {
+      auto op = it->insn->opcode();
+      if (opcode::may_throw(op) || opcode::is_throw(op)) {
+        return true;
+      }
+      continue;
+    }
+    case MFLOW_POSITION:
+      return false;
+    default:
+      continue;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 namespace dedup_blocks_impl {
@@ -315,27 +336,9 @@ class DedupBlocksImpl {
     return duplicates;
   }
 
-  // Replace duplicated blocks with the "canon" (block with lowest ID).
-  void dedup_blocks(cfg::ControlFlowGraph& cfg, const BlockSet& blocks) {
-    // canon is block with lowest id.
-    cfg::Block* canon = *blocks.begin();
-
-    for (cfg::Block* block : blocks) {
-      if (block != canon) {
-        always_assert(canon->id() < block->id());
-
-        cfg.replace_block(block, canon);
-        ++m_stats.blocks_removed;
-      }
-    }
-  }
-
   // remove all but one of a duplicate set. Reroute the predecessors to the
   // canonical block
   void deduplicate(const Duplicates& dups, cfg::ControlFlowGraph& cfg) {
-    fix_dex_pos_pointers(
-        dups.begin(), dups.end(), [](auto it) { return it->second; }, cfg);
-
     // Copy the BlockSets into a vector so that we're not reading the map while
     // editing the CFG.
     std::vector<BlockSet> order;
@@ -343,9 +346,24 @@ class DedupBlocksImpl {
       order.push_back(entry->second);
     }
 
+    // Replace duplicated blocks with the "canon" (block with lowest ID).
+    std::vector<std::pair<cfg::Block*, cfg::Block*>> blocks_to_replace;
     for (const BlockSet& group : order) {
-      dedup_blocks(cfg, group);
+      // canon is block with lowest id.
+      cfg::Block* canon = *group.begin();
+
+      for (cfg::Block* block : group) {
+        if (block != canon) {
+          always_assert(canon->id() < block->id());
+
+          blocks_to_replace.emplace_back(block, canon);
+          ++m_stats.blocks_removed;
+        }
+      }
     }
+
+    // Note that replace_blocks also fixes any arising dangling parents.
+    m_stats.insns_removed += cfg.replace_blocks(blocks_to_replace);
   }
 
   // The algorithm below identifies the best groups of blocks that share the
@@ -429,8 +447,8 @@ class DedupBlocksImpl {
     }
 
     TRACE(DEDUP_BLOCKS, 4,
-          "split_postfix: partitioned %d blocks into %d groups", blocks.size(),
-          splitGroupMap.size());
+          "split_postfix: partitioned %zu blocks into %zu groups",
+          blocks.size(), splitGroupMap.size());
 
     struct CountGroup {
       size_t count = 0;
@@ -448,7 +466,7 @@ class DedupBlocksImpl {
       }
 
       TRACE(DEDUP_BLOCKS, 4,
-            "split_postfix: current group (succs=%d, blocks=%d)",
+            "split_postfix: current group (succs=%zu, blocks=%zu)",
             b->succs().size(), succ_blocks.size());
 
       // Keep track of best we've seen so far.
@@ -468,7 +486,7 @@ class DedupBlocksImpl {
       // Find the best common blocks
       size_t cur_insn_index = 0;
       while (true) {
-        TRACE(DEDUP_BLOCKS, 4, "split_postfix: scanning instruction at %d",
+        TRACE(DEDUP_BLOCKS, 4, "split_postfix: scanning instruction at %zu",
               cur_insn_index);
 
         // For each "iteration" - we count the distinct instructions and select
@@ -556,7 +574,7 @@ class DedupBlocksImpl {
 
       // Update the current group with the best savings
       TRACE(DEDUP_BLOCKS, 4,
-            "split_postfix: best block group.size() = %d, instruction at %d",
+            "split_postfix: best block group.size() = %zu, instruction at %zu",
             best_blocks.size(), best_insn_count);
       split_group.postfix_block_its = std::move(best_block_its);
       split_group.postfix_blocks = std::move(best_blocks);
@@ -566,7 +584,7 @@ class DedupBlocksImpl {
     remove_if(splitGroupMap,
               [&](auto& entry) { return entry.postfix_blocks.size() <= 1; });
 
-    TRACE(DEDUP_BLOCKS, 4, "split_postfix: total split groups = %d",
+    TRACE(DEDUP_BLOCKS, 4, "split_postfix: total split groups = %zu",
           splitGroupMap.size());
     return splitGroupMap;
   }
@@ -578,7 +596,7 @@ class DedupBlocksImpl {
     for (const PostfixSplitGroupMap::value_type* entry : get_id_order(dups)) {
       const auto& group = entry->second;
       TRACE(DEDUP_BLOCKS, 4,
-            "split_postfix: splitting blocks.size() = %d, instruction at %d",
+            "split_postfix: splitting blocks.size() = %zu, instruction at %zu",
             group.postfix_blocks.size(), group.insn_count);
 
       // Split the blocks at the reverse iterator where we determine to be
@@ -621,89 +639,38 @@ class DedupBlocksImpl {
           continue;
         }
 
+        auto cfg_it = block->to_cfg_instruction_iterator(fwd_it);
         // Split the block
-        auto split_block =
-            cfg.split_block(block->to_cfg_instruction_iterator(fwd_it));
+        auto split_block = cfg.split_block(cfg_it);
+
         TRACE(DEDUP_BLOCKS, 4,
-              "split_postfix: split block : old = %d, new = %d", block->id(),
+              "split_postfix: split block : old = %zu, new = %zu", block->id(),
               split_block->id());
+
+        // Position of first instruction of split-off successor block
+        if (needs_pos(split_block->begin(), split_block->end())) {
+          auto pos = cfg.get_dbg_pos(cfg_it);
+          if (pos) {
+            // Make sure new block gets proper position
+            cfg.insert_before(split_block, split_block->begin(),
+                              std::make_unique<DexPosition>(*pos));
+            ++m_stats.positions_inserted;
+          }
+        }
+
         ++m_stats.blocks_split;
       }
     }
   }
 
-  // DexPositions have `parent` pointers to other DexPositions inside the same
-  // method. We will delete some of these DexPositions, which would create
-  // dangling pointers.
-  //
-  // This method changes those parent pointers to the equivalent DexPosition
-  // in the canonical block
-  template <typename IteratorType, typename GetBlock>
-  void fix_dex_pos_pointers(IteratorType begin,
-                            IteratorType end,
-                            GetBlock get_blocks,
-                            cfg::ControlFlowGraph& cfg) {
-    // A map from the DexPositions we're about to delete to the equivalent
-    // DexPosition in the canonical block.
-    std::unordered_map<DexPosition*, DexPosition*> position_replace_map;
-
-    for (IteratorType it = begin; it != end; ++it) {
-      const auto& blocks = get_blocks(it);
-
-      // canon is block with lowest id.
-      cfg::Block* canon = *blocks.begin();
-
-      std::vector<DexPosition*> canon_positions;
-      for (auto& mie : *canon) {
-        if (mie.type == MFLOW_POSITION) {
-          canon_positions.push_back(mie.pos.get());
-        }
-      }
-
-      for (cfg::Block* block : blocks) {
-        if (block != canon) {
-          // All of `block`s positions are about to be deleted. Add the mapping
-          // from this position to the equivalent canonical position.
-          size_t i = 0;
-          for (auto& mie : *block) {
-            if (mie.type == MFLOW_POSITION) {
-              // If canon has no DexPositions, clear out parent pointers
-              auto replacement =
-                  !canon_positions.empty() ? canon_positions.at(i) : nullptr;
-              position_replace_map.emplace(mie.pos.get(), replacement);
-
-              ++i;
-              if (i >= canon_positions.size()) {
-                // block has more DexPositions than canon.
-                // keep re-using the last one, I guess? FIXME
-                //
-                // TODO: Maybe we could associate DexPositions with their
-                // closest IRInstruction, then combine the DexPositions that
-                // share the same deduped IRInstruction.
-                i = canon_positions.size() - 1;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Search for dangling parent pointers and replace them
-    for (cfg::Block* b : cfg.blocks()) {
-      for (auto& mie : *b) {
-        if (mie.type == MFLOW_POSITION && mie.pos->parent != nullptr) {
-          auto it = position_replace_map.find(mie.pos->parent);
-          if (it != position_replace_map.end()) {
-            mie.pos->parent = it->second;
-          }
-        }
-      }
-    }
-  }
-
-  static bool is_eligible(cfg::Block* block) {
+  bool is_eligible(cfg::Block* block) {
     // We can't split up move-result(-pseudo) instruction pairs
     if (begins_with_move_result(block)) {
+      return false;
+    }
+
+    // For debugability, we don't want to dedup blocks that end with a throw
+    if (!m_config->dedup_throws && ends_with_throw(block)) {
       return false;
     }
 
@@ -720,6 +687,15 @@ class DedupBlocksImpl {
     }
     auto first_op = first_mie_it->insn->opcode();
     return opcode::is_move_result_any(first_op);
+  }
+
+  static bool ends_with_throw(cfg::Block* block) {
+    const auto last_mie_it = block->get_last_insn();
+    if (last_mie_it == block->end()) {
+      return false;
+    }
+    auto last_op = last_mie_it->insn->opcode();
+    return opcode::is_throw(last_op);
   }
 
   // Deal with a verification error like this
@@ -795,7 +771,7 @@ class DedupBlocksImpl {
         }
         if (defs.elements().size() > 1) {
           // should never happen, but we are not going to fight that here
-          TRACE(DEDUP_BLOCKS, 5, "[dedup blocks] defs.elements().size() = %u",
+          TRACE(DEDUP_BLOCKS, 5, "[dedup blocks] defs.elements().size() = %zu",
                 defs.elements().size());
           return boost::none;
         }
@@ -978,7 +954,7 @@ class DedupBlocksImpl {
           DEDUP_BLOCKS, 4, "  hash = %lu",
           DedupBlkValueNumbering::BlockValueHasher{}(*entry.first.block_value));
       for (cfg::Block* b : entry.second) {
-        TRACE(DEDUP_BLOCKS, 4, "    block %d", b->id());
+        TRACE(DEDUP_BLOCKS, 4, "    block %zu", b->id());
         for (const MethodItemEntry& mie : *b) {
           TRACE(DEDUP_BLOCKS, 4, "      %s", SHOW(mie));
         }
@@ -1006,7 +982,9 @@ void DedupBlocks::run() {
 Stats& Stats::operator+=(const Stats& that) {
   eligible_blocks += that.eligible_blocks;
   blocks_removed += that.blocks_removed;
+  insns_removed += that.insns_removed;
   blocks_split += that.blocks_split;
+  positions_inserted += that.positions_inserted;
   for (auto& p : that.dup_sizes) {
     dup_sizes[p.first] += p.second;
   }

@@ -534,7 +534,14 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
   }
   case OPCODE_CHECK_CAST: {
     refine_reference(current_state, insn->src(0));
-    set_reference(current_state, RESULT_REGISTER, insn->get_type());
+    auto to_type = insn->get_type();
+    auto to_cls = type_class(to_type);
+    if (m_skip_check_cast_to_intf && to_cls && is_interface(to_cls)) {
+      set_reference(current_state, RESULT_REGISTER,
+                    current_state->get_type_domain(insn->src(0)));
+    } else {
+      set_reference(current_state, RESULT_REGISTER, insn->get_type());
+    }
     break;
   }
   case OPCODE_INSTANCE_OF:
@@ -824,7 +831,7 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
         dex_method->get_proto()->get_args()->get_type_list();
     size_t expected_args =
         (insn->opcode() != OPCODE_INVOKE_STATIC ? 1 : 0) + arg_types.size();
-    always_assert(insn->srcs_size() == expected_args);
+    always_assert_log(insn->srcs_size() == expected_args, "%s", SHOW(insn));
 
     size_t src_idx{0};
     if (insn->opcode() != OPCODE_INVOKE_STATIC) {

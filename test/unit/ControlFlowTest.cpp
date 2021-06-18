@@ -7,12 +7,14 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <regex>
 
 #include "ControlFlow.h"
 #include "DexAsm.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "RedexTest.h"
+#include "ScopedCFG.h"
 #include "Show.h"
 #include "Trace.h"
 
@@ -280,7 +282,7 @@ TEST_F(ControlFlowTest, iterate2) {
   for (const auto& entry : times_encountered) {
     EXPECT_EQ(1, entry.second);
   }
-  TRACE(CFG, 1, SHOW(code->cfg()));
+  TRACE(CFG, 1, "%s", SHOW(code->cfg()));
 }
 
 TEST_F(ControlFlowTest, iterate3) {
@@ -970,9 +972,7 @@ TEST_F(ControlFlowTest, exit_blocks_change) {
       to_delete.push_back(it.block());
     }
   }
-  for (Block* b : to_delete) {
-    cfg.remove_block(b);
-  }
+  cfg.remove_blocks(to_delete);
   cfg.recompute_registers_size();
 
   EXPECT_EQ(1, cfg.real_exit_blocks().size());
@@ -2267,4 +2267,251 @@ TEST_F(ControlFlowTest, no_crash_on_remove_insn) {
   ASSERT_FALSE(it.is_end());
 
   cfg.remove_insn(it); // Should not crash.
+}
+
+TEST_F(ControlFlowTest, move_result_chain) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+
+      (.try_start foo)
+      (add-int v0 v0 v1)
+      (invoke-static (v0) "LCls;.foo:(I)I")
+
+      (move-result v1)
+      (return v1)
+      (.try_end foo)
+
+      (.catch (foo))
+      (const v1 0)
+      (return v1)
+    )
+  )");
+  code->build_cfg(/* editable */ true);
+  auto& cfg = code->cfg();
+
+  // Find the add, break that block.
+  {
+    auto ii = cfg::InstructionIterable(cfg);
+    auto add_it = std::find_if(ii.begin(), ii.end(), [](const auto& mie) {
+      return mie.insn->opcode() == OPCODE_ADD_INT;
+    });
+    ASSERT_FALSE(add_it.is_end());
+
+    cfg.split_block(add_it);
+  }
+
+  code->clear_cfg();
+
+  // Ensure that the move-result is in the right location.
+  auto invoke_it =
+      std::find_if(code->begin(), code->end(), [](const auto& mie) {
+        return mie.type == MFLOW_OPCODE &&
+               mie.insn->opcode() == OPCODE_INVOKE_STATIC;
+      });
+  ASSERT_TRUE(invoke_it != code->end()) << show(code);
+  auto next_it = std::next(invoke_it);
+  ASSERT_TRUE(next_it != code->end()) << show(code);
+  ASSERT_EQ(next_it->type, MFLOW_OPCODE) << show(code);
+  EXPECT_EQ(next_it->insn->opcode(), OPCODE_MOVE_RESULT) << show(code);
+}
+
+namespace {
+
+std::string sanitize(const std::string& s) {
+  return std::regex_replace(
+      std::regex_replace(std::regex_replace(s, std::regex("0x[0-9a-f]+"), ""),
+                         std::regex(R"((^|\n)\[\] +)"),
+                         "$1"),
+      std::regex(R"( +($|\n))"), "$1");
+}
+
+} // namespace
+
+// Chains are created in block order. Ensure that chains are created correctly
+// when the entry block is not first block on destruction.
+TEST_F(ControlFlowTest, entry_not_first_block_order_first) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (goto :loop)
+
+      (:true)
+      (add-int/lit8 v0 v0 1)
+
+      (:loop)
+      (if-eqz v0 :true)
+
+      (:exit)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->set_entry_block(cfg->blocks().at(2));
+    cfg->simplify();
+    EXPECT_EQ(cfg->order().at(0), cfg->entry_block()) << show(*cfg);
+  }
+}
+
+TEST_F(ControlFlowTest, entry_not_first_block_order_first_linearization) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (goto :loop)
+
+      (:true)
+      (add-int/lit8 v0 v0 1)
+
+      (:loop)
+      (if-eqz v0 :true)
+
+      (:exit)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->entry_block()->remove_insn(cfg->entry_block()->get_first_insn());
+  }
+
+  EXPECT_EQ(sanitize(show(code.get())), R"(TARGET: SIMPLE
+OPCODE: IF_EQZ v0
+OPCODE: RETURN_VOID
+TARGET: SIMPLE
+OPCODE: ADD_INT_LIT8 v0, v0, 1
+OPCODE: GOTO
+)");
+}
+
+TEST_F(ControlFlowTest, empty_block_move_pos) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (.pos "LFoo;.m:()V" "Foo.java" 1)
+      (goto :loop)
+
+      (:true)
+      (add-int/lit8 v0 v0 1)
+
+      (:loop)
+      (if-eqz v0 :true)
+
+      (:exit)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->entry_block()->remove_insn(cfg->entry_block()->get_first_insn());
+  }
+
+  EXPECT_EQ(sanitize(show(code.get())), R"(TARGET: SIMPLE
+POSITION: LFoo;.m:()V(Foo.java:1)
+OPCODE: IF_EQZ v0
+OPCODE: RETURN_VOID
+TARGET: SIMPLE
+OPCODE: ADD_INT_LIT8 v0, v0, 1
+OPCODE: GOTO
+)");
+}
+
+TEST_F(ControlFlowTest, empty_block_do_not_move_into_block_with_pos) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (.pos "LFoo;.m:()V" "Foo.java" 1)
+      (goto :next)
+
+      (:next)
+      (.pos "LFoo;.m:()V" "Foo.java" 2)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->entry_block()->remove_insn(cfg->entry_block()->get_first_insn());
+  }
+
+  EXPECT_EQ(sanitize(show(code.get())), R"(POSITION: LFoo;.m:()V(Foo.java:2)
+OPCODE: RETURN_VOID
+)");
+}
+
+TEST_F(ControlFlowTest, empty_block_do_not_move_into_block_with_pos_complex) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 0)
+      (.pos "LFoo;.m:()V" "Foo.java" 1)
+      (goto :loop)
+
+      (:true)
+      (add-int/lit8 v0 v0 1)
+
+      (:loop)
+      (.pos "LFoo;.m:()V" "Foo.java" 2)
+      (if-eqz v0 :true)
+
+      (:exit)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->entry_block()->remove_insn(cfg->entry_block()->get_first_insn());
+  }
+
+  // TODO: This is really a weird case. It is not clear why this is shifted
+  //       there.
+
+  EXPECT_EQ(sanitize(show(code.get())), R"(TARGET: SIMPLE
+POSITION: LFoo;.m:()V(Foo.java:2)
+OPCODE: IF_EQZ v0
+OPCODE: RETURN_VOID
+TARGET: SIMPLE
+POSITION: LFoo;.m:()V(Foo.java:1)
+OPCODE: ADD_INT_LIT8 v0, v0, 1
+OPCODE: GOTO
+)");
+}
+
+TEST_F(ControlFlowTest, empty_block_move_source_blocks_complex) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (.src_block "LFoo;.m:()V" 1)
+      (const v0 0)
+      (.src_block "LFoo;.m:()V" 2)
+      (goto :loop)
+
+      (:true)
+      (add-int/lit8 v0 v0 1)
+
+      (:loop)
+      (.src_block "LFoo;.m:()V" 3)
+      (if-eqz v0 :true)
+
+      (:exit)
+      (return-void)
+    )
+  )");
+
+  {
+    ScopedCFG cfg(code.get());
+    cfg->entry_block()->remove_insn(cfg->entry_block()->get_first_insn());
+  }
+
+  EXPECT_EQ(sanitize(show(code.get())), R"(TARGET: SIMPLE
+SOURCE-BLOCKS: LFoo;.m:()V@1() LFoo;.m:()V@2() LFoo;.m:()V@3()
+OPCODE: IF_EQZ v0
+OPCODE: RETURN_VOID
+TARGET: SIMPLE
+OPCODE: ADD_INT_LIT8 v0, v0, 1
+OPCODE: GOTO
+)");
 }

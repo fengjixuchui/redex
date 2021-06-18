@@ -192,7 +192,7 @@ size_t estimate_num_switch_dispatch_needed(
   size_t num_cases = indices_to_callee.size();
   // If the config is enabled we shortcut the instruction count limit.
   // This should only happen for testing.
-  TRACE(SDIS, 9, "num cases %d, max num dispatch targets %d", num_cases,
+  TRACE(SDIS, 9, "num cases %zu, max num dispatch targets %zu", num_cases,
         max_num_dispatch_target.get_value_or(0));
   if (max_num_dispatch_target != boost::none &&
       num_cases > max_num_dispatch_target.get()) {
@@ -223,7 +223,7 @@ DexMethod* create_simple_switch_dispatch(
   always_assert(indices_to_callee.size());
   TRACE(SDIS,
         5,
-        "creating leaf switch dispatch %s.%s for targets of size %d",
+        "creating leaf switch dispatch %s.%s for targets of size %zu",
         SHOW(spec.owner_type),
         spec.name.c_str(),
         indices_to_callee.size());
@@ -534,7 +534,7 @@ DispatchMethod create_virtual_dispatch(
     return dispatch;
   }
 
-  TRACE(SDIS, 5, "splitting large dispatch %s.%s into %d",
+  TRACE(SDIS, 5, "splitting large dispatch %s.%s into %zu",
         SHOW(spec.owner_type), spec.name.c_str(), num_switch_needed);
   return create_two_level_switch_dispatch(num_switch_needed, spec,
                                           indices_to_callee);
@@ -546,7 +546,7 @@ DexMethod* create_ctor_or_static_dispatch(
   always_assert(!indices_to_callee.empty() && spec.overridden_meth == nullptr);
   TRACE(SDIS,
         5,
-        "creating dispatch %s.%s for targets of size %d",
+        "creating dispatch %s.%s for targets of size %zu",
         SHOW(spec.owner_type),
         spec.name.c_str(),
         indices_to_callee.size());
@@ -616,7 +616,7 @@ DexMethod* create_simple_dispatch(
   for (auto& p : indices_to_callee) {
     cases[p.first] = nullptr;
   }
-  auto default_block = main_block->switch_op(method_tag_loc, cases);
+  /* default_block = */ main_block->switch_op(method_tag_loc, cases);
   bool has_return_value = (return_type != type::_void());
   auto res_loc =
       has_return_value ? mc.make_local(return_type) : Location::empty();

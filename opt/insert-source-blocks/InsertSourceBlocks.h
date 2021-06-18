@@ -22,5 +22,11 @@ class InsertSourceBlocksPass : public Pass {
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
-  bool m_force_serialize_{false};
+  std::string m_profile_files;
+  bool m_force_serialize{false};
+  bool m_force_run{false};
+  bool m_insert_after_excs{true};
+  bool m_always_inject{false};
+
+  friend class SourceBlocksTest;
 };

@@ -17,13 +17,12 @@ namespace {
 
 void fix_colliding_dmethods(
     const Scope& scope,
-    const std::map<DexMethod*, DexProto*, dexmethods_comparator>&
-        colliding_methods) {
+    const std::vector<std::pair<DexMethod*, DexProto*>>& colliding_methods) {
   if (colliding_methods.empty()) {
     return;
   }
   // Fix colliding methods by appending an additional param.
-  TRACE(REFU, 9, "sig: colliding_methods %d", colliding_methods.size());
+  TRACE(REFU, 9, "sig: colliding_methods %zu", colliding_methods.size());
   std::unordered_map<DexMethod*, size_t> num_additional_args;
   for (auto it : colliding_methods) {
     auto meth = it.first;
@@ -55,7 +54,7 @@ void fix_colliding_dmethods(
     }
     TRACE(REFU,
           9,
-          "sig: patching colliding method %s with %d additional args",
+          "sig: patching colliding method %s with %zu additional args",
           SHOW(meth),
           arg_count);
   }
@@ -71,7 +70,7 @@ void fix_colliding_dmethods(
           insn->get_method(),
           opcode_to_search(const_cast<IRInstruction*>(insn)), meth);
       if (callee == nullptr ||
-          colliding_methods.find(callee) == colliding_methods.end()) {
+          num_additional_args.find(callee) == num_additional_args.end()) {
         continue;
       }
       callsites.emplace_back(meth, &mie, callee);
@@ -312,26 +311,14 @@ void TypeRefUpdater::update_methods_fields(const Scope& scope) {
       }
     }
   });
-  {
-    auto wq = workqueue_foreach<DexFieldRef*>(
-        [this](DexFieldRef* field) { mangling(field); });
-    for (auto field : fields) {
-      wq.add_item(field);
-    }
-    wq.run_all();
-  }
-  {
-    auto wq = workqueue_foreach<DexMethodRef*>(
-        [this](DexMethodRef* method) { mangling(method); });
-    for (auto method : methods) {
-      wq.add_item(method);
-    }
-    wq.run_all();
-  }
+  workqueue_run<DexFieldRef*>([this](DexFieldRef* field) { mangling(field); },
+                              fields);
+  workqueue_run<DexMethodRef*>(
+      [this](DexMethodRef* method) { mangling(method); }, methods);
 
   std::map<DexMethod*, DexProto*, dexmethods_comparator> inits(m_inits.begin(),
                                                                m_inits.end());
-  std::map<DexMethod*, DexProto*, dexmethods_comparator> colliding_inits;
+  std::vector<std::pair<DexMethod*, DexProto*>> colliding_inits;
   for (auto& pair : inits) {
     auto* method = pair.first;
     auto* new_proto = pair.second;
@@ -342,7 +329,7 @@ void TypeRefUpdater::update_methods_fields(const Scope& scope) {
       method->change(spec, false /* rename on collision */);
       TRACE(REFU, 9, "Update ctor %s ", SHOW(method));
     } else {
-      colliding_inits.emplace(method->as_def(), new_proto);
+      colliding_inits.emplace_back(std::make_pair(method->as_def(), new_proto));
     }
   }
   fix_colliding_dmethods(scope, colliding_inits);
@@ -564,8 +551,8 @@ void update_method_signature_type_references(
   // The key is the hash of signature and an old type reference. Group the
   // methods by key.
   VMethodsGroups vmethods_groups;
-  // Direct methods.
-  std::map<DexMethod*, DexProto*, dexmethods_comparator> colliding_directs;
+  // Colliding direct methods.
+  std::vector<std::pair<DexMethod*, DexProto*>> colliding_directs;
 
   // Callback for updating method debug map.
   std::function<void(DexMethod*)> update_method_debug_map = [](DexMethod*) {};
@@ -600,7 +587,7 @@ void update_method_signature_type_references(
         spec.proto = new_proto;
         method->change(spec, true /* rename on collision */);
       } else {
-        colliding_directs[method] = new_proto;
+        colliding_directs.emplace_back(std::make_pair(method, new_proto));
       }
       return;
     }

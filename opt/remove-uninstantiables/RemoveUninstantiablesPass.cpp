@@ -7,10 +7,13 @@
 
 #include "RemoveUninstantiablesPass.h"
 
+#include <cinttypes>
+
 #include "CFGMutation.h"
 #include "ControlFlow.h"
 #include "DexUtil.h"
 #include "IRCode.h"
+#include "NullPointerExceptionUtil.h"
 #include "PassManager.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -252,10 +255,11 @@ RemoveUninstantiablesPass::Stats RemoveUninstantiablesPass::Stats::operator+(
 }
 
 void RemoveUninstantiablesPass::Stats::report(PassManager& mgr) const {
-#define REPORT(STAT)                                                       \
-  do {                                                                     \
-    mgr.incr_metric(#STAT, STAT);                                          \
-    TRACE(RMUNINST, 2, "  " #STAT ": %d/%d", STAT, mgr.get_metric(#STAT)); \
+#define REPORT(STAT)                                                           \
+  do {                                                                         \
+    mgr.incr_metric(#STAT, STAT);                                              \
+    TRACE(                                                                     \
+        RMUNINST, 2, "  " #STAT ": %d/%" PRId64, STAT, mgr.get_metric(#STAT)); \
   } while (0)
 
   TRACE(RMUNINST, 2, "RemoveUninstantiablesPass Stats:");
@@ -345,16 +349,9 @@ RemoveUninstantiablesPass::replace_uninstantiable_refs(
     cfg::ControlFlowGraph& cfg) {
   cfg::CFGMutation m(cfg);
 
-  // Lazily generate a scratch register.
-  auto get_scratch = [&cfg, reg = boost::optional<uint32_t>()]() mutable {
-    if (!reg) {
-      reg = cfg.allocate_temp();
-    }
-    return *reg;
-  };
-
   Stats stats;
   auto ii = InstructionIterable(cfg);
+  npe::NullPointerExceptionCreator npe_creator(&cfg);
   for (auto it = ii.begin(); it != ii.end(); ++it) {
     auto insn = it->insn;
     auto op = insn->opcode();
@@ -375,8 +372,7 @@ RemoveUninstantiablesPass::replace_uninstantiable_refs(
       // class information is already present in the supplied method reference,
       // which gives us the best change of finding an uninstantiable type.
       if (scoped_uninstantiable_types.count(insn->get_method()->get_class())) {
-        auto tmp = get_scratch();
-        m.replace(it, {ir_const(tmp, 0), ir_throw(tmp)});
+        m.replace(it, npe_creator.get_insns(insn));
         stats.invokes++;
       }
       continue;
@@ -397,10 +393,16 @@ RemoveUninstantiablesPass::replace_uninstantiable_refs(
       break;
     }
 
-    if ((opcode::is_an_iget(op) || opcode::is_an_iput(op)) &&
+    if (opcode::is_an_iget(op) &&
         scoped_uninstantiable_types.count(insn->get_field()->get_class())) {
-      auto tmp = get_scratch();
-      m.replace(it, {ir_const(tmp, 0), ir_throw(tmp)});
+      m.replace(it, npe_creator.get_insns(insn));
+      stats.field_accesses_on_uninstantiable++;
+      continue;
+    }
+
+    if (opcode::is_an_iput(op) &&
+        scoped_uninstantiable_types.count(insn->get_field()->get_class())) {
+      m.replace(it, npe_creator.get_insns(insn));
       stats.field_accesses_on_uninstantiable++;
       continue;
     }
@@ -513,8 +515,9 @@ void RemoveUninstantiablesPass::run_pass(DexStoresVector& stores,
         cls->set_access((cls->get_access() & ~ACC_FINAL) | ACC_ABSTRACT);
       }
       for (auto method : cpp.abstract_vmethods) {
-        method->set_access((DexAccessFlags)(
-            (method->get_access() & ~ACC_FINAL) | ACC_ABSTRACT));
+        method->set_access(
+            (DexAccessFlags)((method->get_access() & ~ACC_FINAL) |
+                             ACC_ABSTRACT));
         method->set_code(nullptr);
       }
     }

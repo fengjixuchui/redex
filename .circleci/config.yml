@@ -18,13 +18,37 @@ orbs:
   win: circleci/windows@2.2.0
 
 commands:
+  # Setup container.
+  debian-based-image-build-setup:
+    steps:
+      - run:
+          name: Update Apt Data
+          command: |
+            sudo apt-get update
+
   # Setup. Includes boost.
   base-build-setup:
+    parameters:
+      save_boost_cache:
+        type: boolean
+        default: false
     steps:
+      # It is OK to generically restore boost, even if it is not used.
+      - restore_cache:
+          keys:
+            - boost-1-71-0-v1
       - run:
           name: Setup
           command: |
             sudo ./setup_oss_toolchain.sh
+      # Only save the cache when asked, e.g., hopefully when it was populated.
+      - when:
+          condition: << parameters.save_boost_cache >>
+          steps:
+            - save_cache:
+                paths:
+                  - boost_cache
+                key: boost-1-71-0-v1
 
   # For testing, need additional dependencies not provided by the image.
   test-build-setup:
@@ -100,6 +124,13 @@ commands:
             - ~/sdk
           key: android-build-tools-{{ checksum "cache_version.rev" }}
 
+  install-clang:
+    steps:
+      - run:
+          name: Install Clang (Deb Testing)
+          command: |
+            sudo apt-get install -y --no-install-recommends clang
+
   configure-and-build-w-make:
     parameters:
       configure_extra:
@@ -119,7 +150,7 @@ commands:
           # The old Travis limit. Hopefully ensures GCC does
           # not die.
           command: |
-            make -j4
+            make -j4 V=0
 
   # Build & run tests.
   test-w-make:
@@ -128,13 +159,13 @@ commands:
       - run:
           name: Build tests
           command: |
-            make -j4 check TESTS=
+            make -j4 check TESTS= V=0
       - run:
           name: Run tests
           command: |
             mkdir -p /tmp/test-results
             export GTEST_OUTPUT=xml:/tmp/test-results/
-            make -j4 check
+            make -j4 check V=0
       - store_test_results:
           path: /tmp/test-results
 
@@ -144,8 +175,12 @@ commands:
       configure_extra:
         default: ""
         type: string
+      save_boost_cache:
+        type: boolean
+        default: false
     steps:
-      - base-build-setup
+      - base-build-setup:
+          save_boost_cache: << parameters.save_boost_cache >>
       - test-build-setup
 
       - configure-and-build-w-make:
@@ -159,8 +194,12 @@ commands:
       configure_extra:
         default: ""
         type: string
+      save_boost_cache:
+        type: boolean
+        default: false
     steps:
-      - base-build-setup
+      - base-build-setup:
+          save_boost_cache: << parameters.save_boost_cache >>
       - test-build-setup-sdk
 
       - configure-and-build-w-make:
@@ -187,7 +226,7 @@ commands:
       - run:
           name: Build
           shell: c:/tools/msys64/msys2_shell.cmd -defterm -no-start -mingw64 -full-path -here -c
-          command: mkdir build && cd build && cmake -G "MSYS Makefiles" .. && make -j 4
+          command: mkdir build && cd build && cmake -G "MSYS Makefiles" .. && make -j 4 V=0
 
       - run:
           name: Minimal Test
@@ -198,21 +237,18 @@ commands:
       - run:
           name: Package
           shell: c:/tools/msys64/msys2_shell.cmd -defterm -no-start -mingw64 -full-path -here -c
-          command: cd build && make -j 4 package
+          command: cd build && make -j 4 package V=0
 
 jobs:
-  build-16_04:
+  build-18_04:
     docker:
-      - image: circleci/buildpack-deps:xenial
+      - image: circleci/buildpack-deps:bionic
     # GCC is hungry.
     resource_class: large
-    # Tell everyone we're using GCC 5.
-    environment:
-      CXX: g++-5
     steps:
       - checkout
-      - setup-build-and-test-w-make:
-          configure_extra: "CXX='g++-5'"
+      - debian-based-image-build-setup
+      - setup-build-and-test-w-make
 
   build-20_04:
     docker:
@@ -221,7 +257,9 @@ jobs:
     resource_class: large
     steps:
       - checkout
-      - setup-build-and-test-w-make
+      - debian-based-image-build-setup
+      - setup-build-and-test-w-make:
+          save_boost_cache: true
 
   build-deb_stable:
     docker:
@@ -230,6 +268,7 @@ jobs:
     resource_class: large
     steps:
       - checkout
+      - debian-based-image-build-setup
       - setup-build-and-test-w-make
 
   build-deb_testing:
@@ -239,6 +278,20 @@ jobs:
     resource_class: large
     steps:
       - checkout
+      - debian-based-image-build-setup
+      - setup-build-and-test-w-make-sdk
+
+  build-deb_testing-w-clang:
+    docker:
+      - image: circleci/buildpack-deps:testing
+    resource_class: large
+    environment:
+      CC: clang
+      CXX: clang++
+    steps:
+      - checkout
+      - debian-based-image-build-setup
+      - install-clang
       - setup-build-and-test-w-make-sdk
 
   build-windows:
@@ -273,8 +326,7 @@ jobs:
 
   deploy-website:
     docker:
-      # specify the version you desire here
-      - image: circleci/node:8.11.1
+      - image: cimg/node:10.24
 
     steps:
       - checkout
@@ -295,7 +347,7 @@ workflows:
   version: 2.1
   build_master:
     jobs:
-      - build-16_04:
+      - build-18_04:
           filters: *filter-only-master
       - build-windows:
           filters: *filter-only-master
@@ -307,13 +359,15 @@ workflows:
     jobs:
       # Note: only filter gh-pages for 'build_other' so that pull
       #       requests/stable get checked.
-      - build-16_04:
+      - build-18_04:
           filters: *filter-not-gh-pages-not-master
       - build-20_04:
           filters: *filter-not-gh-pages-not-master
       - build-deb_stable:
           filters: *filter-not-gh-pages-not-master
       - build-deb_testing:
+          filters: *filter-not-gh-pages-not-master
+      - build-deb_testing-w-clang:
           filters: *filter-not-gh-pages-not-master
       - build-windows:
           filters: *filter-not-gh-pages-not-master
@@ -327,4 +381,5 @@ workflows:
       - build-20_04
       - build-deb_stable
       - build-deb_testing
+      - build-deb_testing-w-clang
       - build-windows-artifacts

@@ -10,6 +10,7 @@
 #include "BlockInstrument.h"
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "IRList.h"
 #include "InterDexPass.h"
 #include "InterDexPassPlugin.h"
 #include "Match.h"
@@ -201,7 +202,7 @@ void do_simple_method_tracing(DexClass* analysis_cls,
   ofs << "#,simple-method-tracing,1.0" << std::endl;
 
   size_t method_id = 0;
-  int excluded = 0;
+  size_t excluded = 0;
   std::unordered_set<std::string> method_names;
   std::vector<DexMethod*> to_instrument;
 
@@ -355,7 +356,7 @@ void do_simple_method_tracing(DexClass* analysis_cls,
 
   TRACE(INSTRUMENT,
         1,
-        "%d methods were instrumented (%d methods were excluded)",
+        "%zu methods were instrumented (%zu methods were excluded)",
         method_id,
         excluded);
 
@@ -405,6 +406,48 @@ std::unordered_set<std::string> load_blocklist_file(
   TRACE(INSTRUMENT, 3, "Loaded %zu blocklist entries from %s", ret.size(),
         SHOW(file_name));
   return ret;
+}
+
+void count_source_block_chain_length(DexStoresVector& stores, PassManager& pm) {
+  std::atomic<size_t> longest_list{0};
+  std::atomic<size_t> sum{0};
+  std::atomic<size_t> count{0};
+  walk::parallel::methods(build_class_scope(stores), [&](DexMethod* m) {
+    auto* code = m->get_code();
+    if (code == nullptr) {
+      return;
+    }
+    boost::optional<size_t> last_known = boost::none;
+    for (auto& mie : *code) {
+      if (mie.type == MFLOW_SOURCE_BLOCK) {
+        size_t len = 0;
+        for (auto* sb = mie.src_block.get(); sb != nullptr;
+             sb = sb->next.get()) {
+          ++len;
+        }
+        count.fetch_add(1);
+        sum.fetch_add(len);
+
+        if (last_known && *last_known >= len) {
+          continue;
+        }
+        for (;;) {
+          auto cur = longest_list.load();
+          if (cur >= len) {
+            last_known = cur;
+            break;
+          }
+          if (longest_list.compare_exchange_strong(cur, len)) {
+            last_known = len;
+            break;
+          }
+        }
+      }
+    }
+  });
+  pm.set_metric("longest_sb_chain", longest_list.load());
+  pm.set_metric("average100_sb_chain",
+                count.load() > 0 ? 100 * sum.load() / count.load() : 0);
 }
 
 } // namespace
@@ -527,6 +570,10 @@ void InstrumentPass::bind_config() {
   // 0 means the block tracing is effectively method-only tracing.
   bind("max_num_blocks", 0, m_options.max_num_blocks);
   bind("instrument_catches", false, m_options.instrument_catches);
+  bind("instrument_blocks_without_source_block", true,
+       m_options.instrument_blocks_without_source_block);
+  bind("instrument_only_root_store", false,
+       m_options.instrument_only_root_store);
 
   size_t max_analysis_methods;
   if (m_options.instrumentation_strategy == SIMPLE_METHOD_TRACING) {
@@ -819,11 +866,14 @@ void InstrumentPass::run_pass(DexStoresVector& stores,
     return;
   }
 
+  count_source_block_chain_length(stores, pm);
+
   if (!cfg.get_json_config().get("instrument_pass_enabled", false) &&
       !pm.get_redex_options().instrument_pass_enabled) {
     TRACE(INSTRUMENT, 1,
           "--enable-instrument-pass (or \"instrument_pass_enabled\": true) is "
           "not specified.");
+    pm.set_metric("skipped_pass", 1);
     return;
   }
 
@@ -833,6 +883,7 @@ void InstrumentPass::run_pass(DexStoresVector& stores,
       m_options.blocklist.insert(e);
     }
   }
+  pm.set_metric("blocklist_size", m_options.blocklist.size());
 
   if (m_options.analysis_class_name.empty()) {
     std::cerr << "[InstrumentPass] error: empty analysis class name."

@@ -119,14 +119,14 @@ void write_intermediate_dex(const RedexOptions& redex_options,
       write_classes_to_dex(redex_options,
                            filename,
                            &store.get_dexen()[i],
-                           nullptr /* locator_index */,
+                           /* locator_index= */ nullptr,
                            store_number,
                            i,
                            conf,
                            pos_mapper.get(),
-                           nullptr,
-                           nullptr,
-                           nullptr /* IODIMetadata* */,
+                           /* method_to_id= */ nullptr,
+                           /* code_debug_lines= */ nullptr,
+                           /* iodi_metadata= */ nullptr,
                            stores[0].get_dex_magic());
       auto basename = boost::filesystem::path(filename).filename().string();
       store_files["list"].append(basename);
@@ -169,6 +169,15 @@ static void assert_dex_magic_consistency(const std::string& source,
   always_assert_log(source.compare(target) == 0,
                     "APK contains dex file of different versions: %s vs %s\n",
                     source.c_str(), target.c_str());
+}
+
+bool is_zip(const std::string& filename) {
+  char buffer[2];
+  std::ifstream infile(filename);
+  always_assert(infile);
+  infile.read(buffer, 2);
+  // the first two bytes of a ZIP file are usually "PK"
+  return buffer[0] == 'P' && buffer[1] == 'K';
 }
 } // namespace
 
@@ -268,6 +277,14 @@ void load_classes_from_dexes_and_metadata(
       input_totals += dex_stats;
       input_dexes_stats.push_back(dex_stats);
       stores[0].add_classes(std::move(classes));
+    } else if (is_zip(filename)) {
+      std::cerr << "error: Input files are expected to be DEX (with filename "
+                   "ending in "
+                   ".dex), or a JSON metadata file. However, \""
+                << filename
+                << "\" is a ZIP. If this is an APK, please extract "
+                   "the DEX files from it and pass those as the inputs.";
+      exit(EXIT_FAILURE);
     } else {
       DexMetadata store_metadata;
       store_metadata.parse(filename);
@@ -298,20 +315,6 @@ void load_classes_from_dexes_and_metadata(
 std::string get_dex_output_name(const std::string& output_dir,
                                 const DexStore& store,
                                 int index) {
-  std::ostringstream ss;
-  ss << output_dir << "/" << store.get_name();
-  if (store.get_name().compare("classes") == 0) {
-    // primary/secondary dex store, primary has no numeral and secondaries
-    // start at 2
-    if (index > 0) {
-      ss << (index + 1);
-    }
-  } else {
-    // other dex stores do not have a primary,
-    // so it makes sense to start at 2
-    ss << (index + 2);
-  }
-  ss << ".dex";
-  return ss.str();
+  return output_dir + "/" + dex_name(store, index);
 }
 } // namespace redex

@@ -16,6 +16,7 @@
 #include "Debug.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexPosition.h"
 #include "DuplicateClasses.h"
 #include "ProguardConfiguration.h"
 #include "Show.h"
@@ -71,6 +72,8 @@ RedexContext::~RedexContext() {
   for (const Task& t : m_destruction_tasks) {
     t();
   }
+
+  delete m_position_pattern_switch_manager;
 }
 
 /*
@@ -370,6 +373,14 @@ void RedexContext::mutate_method(DexMethodRef* method,
   s_method_map.emplace(r, method);
 }
 
+PositionPatternSwitchManager*
+RedexContext::get_position_pattern_switch_manager() {
+  if (!m_position_pattern_switch_manager) {
+    m_position_pattern_switch_manager = new PositionPatternSwitchManager();
+  }
+  return m_position_pattern_switch_manager;
+}
+
 // Return false on unique classes
 // Return true on benign duplicate classes
 // Throw RedexException on problematic duplicate classes
@@ -485,4 +496,9 @@ void RedexContext::unset_return_value(DexMethod* method) {
 void RedexContext::add_destruction_task(const Task& t) {
   std::unique_lock<std::mutex> lock{m_destruction_tasks_lock};
   m_destruction_tasks.push_back(t);
+}
+
+void RedexContext::set_sb_interaction_index(
+    const std::unordered_map<std::string, size_t>& input) {
+  m_sb_interaction_indices = input;
 }

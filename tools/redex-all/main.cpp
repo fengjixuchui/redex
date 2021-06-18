@@ -5,8 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <boost/thread/thread.hpp>
 #include <cinttypes>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -67,6 +69,7 @@
 #include "ToolsCommon.h"
 #include "Walkers.h"
 #include "Warning.h"
+#include "WorkQueue.h" // For concurrency.
 
 namespace {
 
@@ -634,6 +637,8 @@ Json::Value get_pass_hashes(const PassManager& mgr) {
   Json::Value all(Json::ValueType::objectValue);
   auto initial_hash = mgr.get_initial_hash();
   if (initial_hash) {
+    all["(initial)-positions"] =
+        hashing::hash_to_string(initial_hash->positions_hash);
     all["(initial)-registers"] =
         hashing::hash_to_string(initial_hash->registers_hash);
     all["(initial)-code"] = hashing::hash_to_string(initial_hash->code_hash);
@@ -643,6 +648,8 @@ Json::Value get_pass_hashes(const PassManager& mgr) {
   for (const auto& pass_info : mgr.get_pass_info()) {
     auto hash = pass_info.hash;
     if (hash) {
+      all[pass_info.name + "-positions"] =
+          hashing::hash_to_string(hash->positions_hash);
       all[pass_info.name + "-registers"] =
           hashing::hash_to_string(hash->registers_hash);
       all[pass_info.name + "-code"] = hashing::hash_to_string(hash->code_hash);
@@ -660,6 +667,12 @@ Json::Value get_lowering_stats(const instruction_lowering::Stats& stats) {
   return obj;
 }
 
+Json::Value get_position_stats(const PositionMapper* pos_mapper) {
+  Json::Value obj(Json::ValueType::objectValue);
+  obj["num_positions"] = Json::UInt(pos_mapper->size());
+  return obj;
+}
+
 Json::Value get_detailed_stats(const std::vector<dex_stats_t>& dexes_stats) {
   Json::Value dexes;
   int i = 0;
@@ -669,12 +682,17 @@ Json::Value get_detailed_stats(const std::vector<dex_stats_t>& dexes_stats) {
   return dexes;
 }
 
-Json::Value get_times() {
+Json::Value get_times(double cpu_time_s) {
   Json::Value list(Json::arrayValue);
   for (const auto& t : Timer::get_times()) {
     Json::Value element;
     element[t.first] = std::round(t.second * 10) / 10.0;
     list.append(element);
+  }
+  {
+    Json::Value cpu_element;
+    cpu_element["cpu_time"] = std::round(cpu_time_s * 10) / 10.0;
+    list.append(cpu_element);
   }
   return list;
 }
@@ -691,13 +709,23 @@ Json::Value get_output_stats(
     const dex_stats_t& stats,
     const std::vector<dex_stats_t>& dexes_stats,
     const PassManager& mgr,
-    const instruction_lowering::Stats& instruction_lowering_stats) {
+    const instruction_lowering::Stats& instruction_lowering_stats,
+    const PositionMapper* pos_mapper) {
   Json::Value d;
   d["total_stats"] = get_stats(stats);
   d["dexes_stats"] = get_detailed_stats(dexes_stats);
   d["pass_stats"] = get_pass_stats(mgr);
   d["pass_hashes"] = get_pass_hashes(mgr);
   d["lowering_stats"] = get_lowering_stats(instruction_lowering_stats);
+  d["position_stats"] = get_position_stats(pos_mapper);
+  return d;
+}
+
+Json::Value get_threads_stats() {
+  Json::Value d;
+  d["used"] = (Json::UInt64)redex_parallel::default_num_threads();
+  d["hardware"] = (Json::UInt64)boost::thread::hardware_concurrency();
+  d["physical"] = (Json::UInt64)boost::thread::physical_concurrency();
   return d;
 }
 
@@ -706,7 +734,8 @@ void write_debug_line_mapping(
     const std::unordered_map<DexMethod*, uint64_t>& method_to_id,
     const std::unordered_map<DexCode*, std::vector<DebugLineItem>>&
         code_debug_lines,
-    DexStoresVector& stores) {
+    DexStoresVector& stores,
+    const std::vector<DexMethod*>& needs_debug_line_mapping) {
   /*
    * Binary file format:
    * magic number 0xfaceb000 (4 byte)
@@ -739,11 +768,17 @@ void write_debug_line_mapping(
   std::ostringstream line_out;
 
   auto scope = build_class_scope(stores);
-  walk::methods(scope, [&](DexMethod* method) {
+  std::vector<DexMethod*> all_methods(std::begin(needs_debug_line_mapping),
+                                      std::end(needs_debug_line_mapping));
+  walk::methods(scope,
+                [&](DexMethod* method) { all_methods.push_back(method); });
+  std::stable_sort(all_methods.begin(), all_methods.end(), compare_dexmethods);
+
+  for (auto* method : all_methods) {
     auto dex_code = method->get_dex_code();
     if (dex_code == nullptr ||
         code_debug_lines.find(dex_code) == code_debug_lines.end()) {
-      return;
+      continue;
     }
 
     uint64_t method_id = method_to_id.at(method);
@@ -764,7 +799,7 @@ void write_debug_line_mapping(
       line_out.write((const char*)&it->offset, bit_32_size);
       line_out.write((const char*)&it->line, bit_32_size);
     }
-  });
+  }
   ofs << line_out.str();
 }
 
@@ -853,7 +888,13 @@ void redex_frontend(ConfigFiles& conf, /* input */
   for (const auto& jar_path : args.jar_paths) {
     std::istringstream jar_stream(jar_path);
     std::string dependent_jar_path;
-    while (std::getline(jar_stream, dependent_jar_path, ':')) {
+    constexpr char kDelim =
+#if IS_WINDOWS
+        ';';
+#else
+        ':';
+#endif
+    while (std::getline(jar_stream, dependent_jar_path, kDelim)) {
       TRACE(MAIN,
             2,
             "Dependent JAR specified on command-line: %s",
@@ -1011,10 +1052,18 @@ void redex_backend(ConfigFiles& conf,
                                                   : line_number_map_filename));
   std::unordered_map<DexMethod*, uint64_t> method_to_id;
   std::unordered_map<DexCode*, std::vector<DebugLineItem>> code_debug_lines;
-  IODIMetadata iodi_metadata(redex_options.min_sdk);
 
+  bool iodi_disable_min_sdk_opt;
+  conf.get_json_config().get("iodi_disable_min_sdk_opt", false,
+                             iodi_disable_min_sdk_opt);
+  IODIMetadata iodi_metadata(redex_options.min_sdk, iodi_disable_min_sdk_opt);
+
+  std::set<uint32_t> signatures;
   std::unique_ptr<PostLowering> post_lowering =
       redex_options.redacted ? PostLowering::create() : nullptr;
+  bool symbolicate_detached_methods;
+  conf.get_json_config().get("symbolicate_detached_methods", false,
+                             symbolicate_detached_methods);
 
   if (post_lowering) {
     post_lowering->sync();
@@ -1028,31 +1077,42 @@ void redex_backend(ConfigFiles& conf,
     auto& store = stores[store_number];
     Timer t("Writing optimized dexes");
     for (size_t i = 0; i < store.get_dexen().size(); i++) {
-      auto this_dex_stats =
-          write_classes_to_dex(redex_options,
-                               redex::get_dex_output_name(output_dir, store, i),
-                               &store.get_dexen()[i],
-                               locator_index,
-                               store_number,
-                               i,
-                               conf,
-                               pos_mapper.get(),
-                               needs_addresses ? &method_to_id : nullptr,
-                               needs_addresses ? &code_debug_lines : nullptr,
-                               is_iodi(dik) ? &iodi_metadata : nullptr,
-                               stores[0].get_dex_magic(),
-                               post_lowering.get(),
-                               manager.get_redex_options().min_sdk,
-                               disable_method_similarity_order);
+      auto this_dex_stats = write_classes_to_dex(
+          redex_options,
+          redex::get_dex_output_name(output_dir, store, i),
+          &store.get_dexen()[i],
+          locator_index,
+          store_number,
+          i,
+          conf,
+          pos_mapper.get(),
+          needs_addresses ? &method_to_id : nullptr,
+          needs_addresses ? &code_debug_lines : nullptr,
+          is_iodi(dik) ? &iodi_metadata : nullptr,
+          stores[0].get_dex_magic(),
+          symbolicate_detached_methods ? post_lowering.get() : nullptr,
+          manager.get_redex_options().min_sdk,
+          disable_method_similarity_order);
 
       output_totals += this_dex_stats;
       output_dexes_stats.push_back(this_dex_stats);
+      signatures.insert(*reinterpret_cast<uint32_t*>(this_dex_stats.signature));
     }
   }
 
+  std::vector<DexMethod*> needs_debug_line_mapping;
   if (post_lowering) {
+    if (symbolicate_detached_methods) {
+      post_lowering->emit_symbolication_metadata(
+          pos_mapper.get(),
+          needs_addresses ? &method_to_id : nullptr,
+          needs_addresses ? &code_debug_lines : nullptr,
+          is_iodi(dik) ? &iodi_metadata : nullptr,
+          needs_debug_line_mapping,
+          signatures);
+    }
     post_lowering->run(stores);
-    post_lowering->finalize(manager.apk_manager());
+    post_lowering->finalize(manager.asset_manager());
   }
 
   {
@@ -1075,14 +1135,16 @@ void redex_backend(ConfigFiles& conf,
         conf.metafile(json_config.get("method_move_map", std::string()));
     if (needs_addresses) {
       write_debug_line_mapping(debug_line_map_filename, method_to_id,
-                               code_debug_lines, stores);
+                               code_debug_lines, stores,
+                               needs_debug_line_mapping);
     }
     if (is_iodi(dik)) {
       iodi_metadata.write(iodi_metadata_filename, method_to_id);
     }
     pos_mapper->write_map();
-    stats["output_stats"] = get_output_stats(
-        output_totals, output_dexes_stats, manager, instruction_lowering_stats);
+    stats["output_stats"] =
+        get_output_stats(output_totals, output_dexes_stats, manager,
+                         instruction_lowering_stats, pos_mapper.get());
     print_warning_summary();
   }
 }
@@ -1171,6 +1233,7 @@ int main(int argc, char* argv[]) {
 
   std::string stats_output_path;
   Json::Value stats;
+  double cpu_time_s;
   {
     Timer redex_all_main_timer("redex-all main()");
 
@@ -1205,9 +1268,10 @@ int main(int argc, char* argv[]) {
 
     std::string apk_dir;
     conf.get_json_config().get("apk_dir", "", apk_dir);
-    const std::string& manifest_filename = apk_dir + "/AndroidManifest.xml";
-    boost::optional<int32_t> maybe_sdk = get_min_sdk(manifest_filename);
+    auto resources = create_resource_reader(apk_dir);
+    boost::optional<int32_t> maybe_sdk = resources->get_min_sdk();
     if (maybe_sdk != boost::none) {
+      TRACE(MAIN, 2, "parsed minSdkVersion = %d", *maybe_sdk);
       args.redex_options.min_sdk = *maybe_sdk;
     }
 
@@ -1225,12 +1289,10 @@ int main(int argc, char* argv[]) {
     PassManager manager(passes, std::move(pg_config), args.config,
                         args.redex_options);
 
-    if (conf.get_json_config().get("force_ab_exp_test_mode", false)) {
-      ab_test::ABExperimentContext::force_test_mode();
-    } else if (manager.get_redex_options().is_art_build ||
-               !args.config.get("enable_ab_experiments", false).asBool()) {
-      ab_test::ABExperimentContext::force_preferred_mode();
-    }
+    std::unordered_map<std::string, std::string> exp_states;
+    conf.get_json_config().get("ab_experiments_states", {}, exp_states);
+    ab_test::ABExperimentContext::parse_experiments_states(
+        exp_states, !manager.get_redex_options().redacted);
 
     {
       Timer t("Running optimization passes");
@@ -1253,17 +1315,23 @@ int main(int argc, char* argv[]) {
 
     stats_output_path = conf.metafile(
         args.config.get("stats_output", "redex-stats.txt").asString());
+
     {
       Timer t("Freeing global memory");
       delete g_redex;
     }
+    cpu_time_s = ((double)std::clock()) / CLOCKS_PER_SEC;
   }
   // now that all the timers are done running, we can collect the data
-  stats["output_stats"]["time_stats"] = get_times();
+  stats["output_stats"]["time_stats"] = get_times(cpu_time_s);
+
   auto vm_stats = get_mem_stats();
   stats["output_stats"]["mem_stats"]["vm_peak"] =
       (Json::UInt64)vm_stats.vm_peak;
   stats["output_stats"]["mem_stats"]["vm_hwm"] = (Json::UInt64)vm_stats.vm_peak;
+
+  stats["output_stats"]["threads"] = get_threads_stats();
+
   {
     std::ofstream out(stats_output_path);
     out << stats;

@@ -70,28 +70,26 @@ DexField* scan_type_tag_field(const char* type_tag_field_name,
 }
 
 // If no type tags, the result is empty.
-MergerToField get_type_tag_fields(
-    const std::vector<const DexType*>& model_root_types,
-    const std::vector<const MergerType*>& mergers,
-    bool input_has_type_tag,
-    bool generate_type_tags) {
+MergerToField get_type_tag_fields(const std::vector<const MergerType*>& mergers,
+                                  bool input_has_type_tag,
+                                  bool generate_type_tags) {
   MergerToField merger_to_type_tag_field;
-  for (const auto model_root_type : model_root_types) {
+  for (auto merger : mergers) {
     DexField* field = nullptr;
     if (input_has_type_tag) {
-      field =
-          scan_type_tag_field(EXTERNAL_TYPE_TAG_FIELD_NAME, model_root_type);
+      field = scan_type_tag_field(EXTERNAL_TYPE_TAG_FIELD_NAME, merger->type);
+      always_assert(field);
       set_public(field);
+      merger_to_type_tag_field[merger] = field;
+    } else if (generate_type_tags) {
+      field = scan_type_tag_field(INTERNAL_TYPE_TAG_FIELD_NAME, merger->type);
+      merger_to_type_tag_field[merger] = field;
     }
-    for (auto merger : mergers) {
-      if (input_has_type_tag) {
-        always_assert(field);
-        merger_to_type_tag_field[merger] = field;
-      } else if (generate_type_tags) {
-        field = scan_type_tag_field(INTERNAL_TYPE_TAG_FIELD_NAME, merger->type);
-        merger_to_type_tag_field[merger] = field;
-      }
-    }
+    TRACE(CLMG,
+          5,
+          "type tag field: merger->type %s field %s",
+          SHOW(merger->type),
+          SHOW(field));
   }
   return merger_to_type_tag_field;
 }
@@ -443,7 +441,7 @@ void fix_existing_merger_cls(const Model& model,
 void trim_method_debug_map(
     const std::unordered_map<const DexType*, DexType*>& mergeable_to_merger,
     std::unordered_map<DexMethod*, std::string>& method_debug_map) {
-  TRACE(CLMG, 5, "Method debug map un-trimmed %d", method_debug_map.size());
+  TRACE(CLMG, 5, "Method debug map un-trimmed %zu", method_debug_map.size());
   size_t trimmed_cnt = 0;
   std20::erase_if(method_debug_map, [&](auto it) {
     if (mergeable_to_merger.count(it->first->get_class())) {
@@ -453,7 +451,7 @@ void trim_method_debug_map(
     return false;
   });
 
-  TRACE(CLMG, 5, "Method debug map trimmed %d", trimmed_cnt);
+  TRACE(CLMG, 5, "Method debug map trimmed %zu", trimmed_cnt);
 }
 
 void write_out_type_mapping(
@@ -484,7 +482,7 @@ void write_out_type_mapping(
   os << out.str();
   TRACE(CLMG,
         4,
-        "Dumped type mapping (%d) to %s",
+        "Dumped type mapping (%zu) to %s",
         out.str().size(),
         mapping_file.c_str());
 }
@@ -591,10 +589,8 @@ std::vector<DexClass*> ModelMerger::merge_model(Scope& scope,
 
   TypeTags type_tags = input_has_type_tag ? collect_type_tags(to_materialize)
                                           : gen_type_tags(to_materialize);
-  auto type_tag_fields = get_type_tag_fields(model.get_roots(),
-                                             to_materialize,
-                                             input_has_type_tag,
-                                             model_spec.generate_type_tag());
+  auto type_tag_fields = get_type_tag_fields(
+      to_materialize, input_has_type_tag, model_spec.generate_type_tag());
   std::unordered_map<DexMethod*, std::string> method_debug_map;
   auto parent_to_children =
       model.get_type_system().get_class_scopes().get_parent_to_children();
@@ -636,7 +632,26 @@ std::vector<DexClass*> ModelMerger::merge_model(Scope& scope,
     post_process(model, type_tags, mergeable_to_merger_ctor);
   }
 
-  TRACE(CLMG, 3, "created %d merger classes", merger_classes.size());
+  // Properly update merged classes or even remove them.
+  auto no_interface = DexTypeList::make_type_list({});
+  scope.erase(
+      std::remove_if(scope.begin(),
+                     scope.end(),
+                     [&mergeable_to_merger, &no_interface](DexClass* cls) {
+                       if (mergeable_to_merger.count(cls->get_type())) {
+                         cls->set_interfaces(no_interface);
+                         cls->set_super_class(type::java_lang_Object());
+                         redex_assert(cls->get_vmethods().empty());
+                         if (!cls->get_clinit() && cls->get_sfields().empty()) {
+                           redex_assert(cls->get_dmethods().empty());
+                           return true;
+                         }
+                       }
+                       return false;
+                     }),
+      scope.end());
+
+  TRACE(CLMG, 3, "created %zu merger classes", merger_classes.size());
   m_stats.m_num_generated_classes = merger_classes.size();
   return merger_classes;
 }

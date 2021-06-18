@@ -8,6 +8,7 @@
 #include "EnumUpcastAnalysis.h"
 
 #include "EnumClinitAnalysis.h"
+#include "Macros.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -67,6 +68,7 @@ enum Reason {
   MULTI_ENUM_TYPES = 8,
   UNSAFE_INVOCATION_ON_CANDIDATE_ENUM = 9,
   IFIELD_SET_OUTSIDE_INIT = 10,
+  CAST_ENUM_ARRAY_TO_OBJECT = 11,
 };
 
 /**
@@ -245,6 +247,8 @@ class EnumUpcastDetector {
     always_assert(insn->opcode() == OPCODE_INVOKE_STATIC);
     auto method_ref = insn->get_method();
     if (method_ref == STRING_VALUEOF_METHOD) {
+      EnumTypes types = env->get(insn->src(0));
+      check_object_cast(types, insn, rejected_enums);
       return;
     }
     auto container = method_ref->get_class();
@@ -338,10 +342,7 @@ class EnumUpcastDetector {
       }
     } else if (method == STRINGBUILDER_APPEND_METHOD) {
       EnumTypes b_types = env->get(insn->src(1));
-      auto that_types = discard_primitives(b_types);
-      if (that_types.size() > 1) {
-        reject(insn, that_types, rejected_enums, MULTI_ENUM_TYPES);
-      }
+      check_object_cast(b_types, insn, rejected_enums);
       return;
     }
     // If not special cases, do the general processing.
@@ -385,6 +386,17 @@ class EnumUpcastDetector {
     }
     type = const_cast<DexType*>(type::get_element_type_if_array(type));
     return m_candidate_enums->count_unsafe(type);
+  }
+
+  void check_object_cast(const EnumTypes& types,
+                         const IRInstruction* insn,
+                         ConcurrentSet<DexType*>* rejected_enums) const {
+    auto that_types = discard_primitives(types);
+    if (that_types.size() > 1) {
+      reject(insn, that_types, rejected_enums, MULTI_ENUM_TYPES);
+    } else if (that_types.size() == 1 && type::is_array(*that_types.begin())) {
+      reject(insn, that_types, rejected_enums, CAST_ENUM_ARRAY_TO_OBJECT);
+    }
   }
 
   /**
@@ -548,7 +560,7 @@ void EnumFixpointIterator::analyze_instruction(const IRInstruction* insn,
     case OPCODE_AGET_OBJECT: {
       EnumTypes types;
       EnumTypes array_types = env->get(insn->src(0));
-      for (const auto& array_type : array_types.elements()) {
+      for (auto const array_type : array_types.elements()) {
         const auto type = type::get_array_element_type(array_type);
         if (type && !type::is_primitive(type)) {
           types.add(type);
@@ -584,7 +596,7 @@ EnumTypeEnvironment EnumFixpointIterator::gen_env(const DexMethod* method) {
   const DexTypeList* args = method->get_proto()->get_args();
   const bool has_this_pointer = !is_static(method);
   size_t load_param_inst_size = 0;
-  for (const auto& mie : InstructionIterable(code)) {
+  for (const auto& mie ATTRIBUTE_UNUSED : InstructionIterable(code)) {
     ++load_param_inst_size;
   }
   always_assert(load_param_inst_size == args->size() + has_this_pointer);

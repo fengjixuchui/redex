@@ -421,21 +421,45 @@ void RenameClassesPassV2::eval_classes(Scope& scope,
                                        ConfigFiles& conf,
                                        bool rename_annotations,
                                        PassManager& mgr) {
-  auto force_rename_hierarchies =
-      build_force_rename_hierarchies(mgr, scope, class_hierarchy);
+  std::unordered_map<const DexType*, std::string> force_rename_hierarchies;
+  std::unordered_set<const DexType*> dont_rename_serde_relationships;
+  std::unordered_set<std::string> dont_rename_class_name_literals;
+  std::unordered_set<std::string> dont_rename_class_for_types_with_reflection;
+  std::unordered_set<std::string> dont_rename_canaries;
+  std::unordered_map<const DexType*, std::string> dont_rename_hierarchies;
+  std::unordered_set<const DexType*> dont_rename_native_bindings;
+  std::unordered_set<const DexType*> dont_rename_annotated;
 
-  auto dont_rename_serde_relationships =
-      build_dont_rename_serde_relationships(scope);
-  auto dont_rename_class_name_literals =
-      build_dont_rename_class_name_literals(scope);
-  auto dont_rename_class_for_types_with_reflection =
-      build_dont_rename_for_types_with_reflection(scope,
-                                                  conf.get_proguard_map());
-  auto dont_rename_canaries = build_dont_rename_canaries(scope);
-  auto dont_rename_hierarchies =
-      build_dont_rename_hierarchies(mgr, scope, class_hierarchy);
-  auto dont_rename_native_bindings = build_dont_rename_native_bindings(scope);
-  auto dont_rename_annotated = build_dont_rename_annotated();
+  std::vector<std::function<void()>> fns{
+      [&] {
+        force_rename_hierarchies =
+            build_force_rename_hierarchies(mgr, scope, class_hierarchy);
+      },
+      [&] {
+        dont_rename_serde_relationships =
+            build_dont_rename_serde_relationships(scope);
+      },
+      [&] {
+        dont_rename_class_name_literals =
+            build_dont_rename_class_name_literals(scope);
+      },
+      [&] {
+        dont_rename_class_for_types_with_reflection =
+            build_dont_rename_for_types_with_reflection(
+                scope, conf.get_proguard_map());
+      },
+      [&] { dont_rename_canaries = build_dont_rename_canaries(scope); },
+      [&] {
+        dont_rename_hierarchies =
+            build_dont_rename_hierarchies(mgr, scope, class_hierarchy);
+      },
+      [&] {
+        dont_rename_native_bindings = build_dont_rename_native_bindings(scope);
+      },
+      [&] { dont_rename_annotated = build_dont_rename_annotated(); }};
+
+  workqueue_run<std::function<void()>>([](std::function<void()>& fn) { fn(); },
+                                       fns);
 
   std::string norule;
 
@@ -720,26 +744,8 @@ void RenameClassesPassV2::rename_classes_in_layouts(
         java_names::internal_to_external(apair.first->str()),
         java_names::internal_to_external(apair.second->str()));
   }
-  ssize_t layout_bytes_delta = 0;
-  size_t num_layout_renamed = 0;
-  auto xml_files = get_xml_files(m_apk_dir + "/res");
-  for (const auto& path : xml_files) {
-    if (is_raw_resource(path)) {
-      continue;
-    }
-    size_t num_renamed = 0;
-    ssize_t out_delta = 0;
-    TRACE(RENAME, 6, "Begin rename Views in layout %s", path.c_str());
-    rename_classes_in_layout(path, aliases_for_layouts, &num_renamed,
-                             &out_delta);
-    TRACE(RENAME, 3, "Renamed %zu ResStringPool entries in layout %s",
-          num_renamed, path.c_str());
-    layout_bytes_delta += out_delta;
-    num_layout_renamed += num_renamed;
-  }
-  mgr.incr_metric("layout_bytes_delta", layout_bytes_delta);
-  TRACE(RENAME, 2, "Renamed %zu ResStringPool entries, delta %zi bytes",
-        num_layout_renamed, layout_bytes_delta);
+  auto resources = create_resource_reader(m_apk_dir);
+  resources->rename_classes_in_layouts(aliases_for_layouts);
 }
 
 std::string RenameClassesPassV2::prepend_package_prefix(
@@ -778,7 +784,7 @@ void RenameClassesPassV2::run_pass(DexStoresVector& stores,
   always_assert_log(scope.size() <
                         std::pow(Locator::global_class_index_digits_base,
                                  Locator::global_class_index_digits_max),
-                    "scope size %uz too large", scope.size());
+                    "scope size %zu too large", scope.size());
   int total_classes = scope.size();
 
   // encode the whole sequence as base 62: [0 - 9], [A - Z], [a - z]

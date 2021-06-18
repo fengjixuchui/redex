@@ -16,11 +16,12 @@
 #include <vector>
 
 #include "AnalysisUsage.h"
-#include "ApkManager.h"
+#include "AssetManager.h"
 #include "DexHasher.h"
 #include "JsonWrapper.h"
 #include "ProguardConfiguration.h"
 #include "RedexOptions.h"
+#include "Timer.h"
 
 struct ConfigFiles;
 class DexStore;
@@ -87,7 +88,7 @@ class PassManager {
 
   const PassInfo* get_current_pass_info() const { return m_current_pass_info; }
 
-  ApkManager& apk_manager() { return m_apk_mgr; }
+  AssetManager& asset_manager() { return m_asset_mgr; }
 
   void record_running_regalloc() { m_regalloc_has_run = true; }
   bool regalloc_has_run() const { return m_regalloc_has_run; }
@@ -121,7 +122,7 @@ class PassManager {
 
   void eval_passes(DexStoresVector&, ConfigFiles&);
 
-  ApkManager m_apk_mgr;
+  AssetManager m_asset_mgr;
   std::vector<Pass*> m_registered_passes;
   std::vector<Pass*> m_activated_passes;
   std::unordered_map<AnalysisID, Pass*> m_preserved_analysis_passes;
@@ -140,4 +141,6 @@ class PassManager {
   Pass* m_malloc_profile_pass{nullptr};
 
   boost::optional<hashing::DexHash> m_initial_hash;
+  AccumulatingTimer m_hashers_timer;
+  AccumulatingTimer m_check_unique_deobfuscateds_timer;
 };
